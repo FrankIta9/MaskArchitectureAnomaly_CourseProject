@@ -4,20 +4,18 @@
 # ============================================================================
 
 # CONFIGURAZIONE - Modifica questi path
-CHECKPOINT="${1:-/content/drive/MyDrive/eomt_checkpoints_warmup/eomt_1024_oe_energy_warmup-epoch=007-metrics_val_iou_all=0.8190.ckpt}"
-OUTPUT_DIR="${2:-results_epoch7}"
-IMG_SIZE="${3:-1024}"
-NUM_BLOCKS="${4:-3}"
-TEMPERATURE="${5:-1.0}"
-METHOD="${6:-msp}"
+CHECKPOINT_DIR="${1:-/content/drive/MyDrive/eomt_checkpoints_warmup/epoch7}"
+CHECKPOINT_FILE="${2:-epoch7.ckpt}"
+OUTPUT_DIR="${3:-results_epoch7}"
+TEMPERATURE="${4:-1.0}"
+METHOD="${5:-msp}"
 
 echo "============================================"
 echo "EoMT Anomaly Segmentation Evaluation"
 echo "============================================"
-echo "Checkpoint: $CHECKPOINT"
+echo "Checkpoint dir: $CHECKPOINT_DIR"
+echo "Checkpoint file: $CHECKPOINT_FILE"
 echo "Output dir: $OUTPUT_DIR"
-echo "Image size: ${IMG_SIZE}x${IMG_SIZE}"
-echo "Num blocks: $NUM_BLOCKS"
 echo "Temperature: $TEMPERATURE"
 echo "Method: $METHOD"
 echo "============================================"
@@ -38,11 +36,10 @@ FS_LOSTFOUND="/content/drive/MyDrive/datasets/FS_LostFound_full"
 echo ""
 echo "📊 Evaluating RoadAnomaly21..."
 python eval_eomt_anomaly.py \
-  --checkpoint "$CHECKPOINT" \
   --input "$ROADANOMALY21/images/*.jpg" \
+  --loadDir "$CHECKPOINT_DIR" \
+  --loadWeights "$CHECKPOINT_FILE" \
   --method "$METHOD" \
-  --img_size "$IMG_SIZE" \
-  --num_blocks "$NUM_BLOCKS" \
   --temperature "$TEMPERATURE" \
   --output "$OUTPUT_DIR/roadanomaly21_${METHOD}.txt"
 
@@ -52,11 +49,10 @@ python eval_eomt_anomaly.py \
 echo ""
 echo "📊 Evaluating RoadObsticle21..."
 python eval_eomt_anomaly.py \
-  --checkpoint "$CHECKPOINT" \
   --input "$ROADOBSTICLE21/images/*.webp" \
+  --loadDir "$CHECKPOINT_DIR" \
+  --loadWeights "$CHECKPOINT_FILE" \
   --method "$METHOD" \
-  --img_size "$IMG_SIZE" \
-  --num_blocks "$NUM_BLOCKS" \
   --temperature "$TEMPERATURE" \
   --output "$OUTPUT_DIR/roadobsticle21_${METHOD}.txt"
 
@@ -66,11 +62,10 @@ python eval_eomt_anomaly.py \
 echo ""
 echo "📊 Evaluating fs_static..."
 python eval_eomt_anomaly.py \
-  --checkpoint "$CHECKPOINT" \
   --input "$FS_STATIC/images/*.jpg" \
+  --loadDir "$CHECKPOINT_DIR" \
+  --loadWeights "$CHECKPOINT_FILE" \
   --method "$METHOD" \
-  --img_size "$IMG_SIZE" \
-  --num_blocks "$NUM_BLOCKS" \
   --temperature "$TEMPERATURE" \
   --output "$OUTPUT_DIR/fs_static_${METHOD}.txt"
 
@@ -80,11 +75,10 @@ python eval_eomt_anomaly.py \
 echo ""
 echo "📊 Evaluating RoadAnomaly..."
 python eval_eomt_anomaly.py \
-  --checkpoint "$CHECKPOINT" \
   --input "$ROADANOMALY/images/*.jpg" \
+  --loadDir "$CHECKPOINT_DIR" \
+  --loadWeights "$CHECKPOINT_FILE" \
   --method "$METHOD" \
-  --img_size "$IMG_SIZE" \
-  --num_blocks "$NUM_BLOCKS" \
   --temperature "$TEMPERATURE" \
   --output "$OUTPUT_DIR/roadanomaly_${METHOD}.txt"
 
@@ -94,11 +88,10 @@ python eval_eomt_anomaly.py \
 echo ""
 echo "📊 Evaluating FS_LostFound_full..."
 python eval_eomt_anomaly.py \
-  --checkpoint "$CHECKPOINT" \
   --input "$FS_LOSTFOUND/images/*.png" \
+  --loadDir "$CHECKPOINT_DIR" \
+  --loadWeights "$CHECKPOINT_FILE" \
   --method "$METHOD" \
-  --img_size "$IMG_SIZE" \
-  --num_blocks "$NUM_BLOCKS" \
   --temperature "$TEMPERATURE" \
   --output "$OUTPUT_DIR/fs_lostfound_${METHOD}.txt"
 

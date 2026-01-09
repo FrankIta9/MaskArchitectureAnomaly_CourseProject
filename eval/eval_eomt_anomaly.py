@@ -1,36 +1,49 @@
-# ---------------------------------------------------------------
-# Evaluation script for EoMT model on anomaly segmentation datasets
-# Computes AuPRC and FPR95 metrics for multiple anomaly datasets
-# ---------------------------------------------------------------
-
+# Copyright (c) OpenMMLab. All rights reserved.
 import os
+import sys
 import glob
-import torch
 import random
+import torch
 import numpy as np
+import torch.nn.functional as F
 from PIL import Image
 from argparse import ArgumentParser
-from ood_metrics import fpr_at_95_tpr
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, roc_curve
 from torchvision.transforms import Compose, Resize, ToTensor
-import torch.nn.functional as F
 
-# Import EoMT model
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'eomt'))
-from models.eomt import EoMT
+# -----------------------------------------------------------------------------
+# SETUP PATH & IMPORTS
+# -----------------------------------------------------------------------------
+# Aggiungiamo dinamicamente la root del progetto al path per importare i moduli custom
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.join(CURRENT_DIR, "..")
+EOMT_ROOT = os.path.join(PROJECT_ROOT, "eomt")
+
+if EOMT_ROOT not in sys.path:
+    sys.path.insert(0, EOMT_ROOT)
+
 from models.vit import ViT
+from models.eomt import EoMT
+from training.lightning_module import LightningModule
 
-seed = 42
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
+# -----------------------------------------------------------------------------
+# CONFIGURAZIONE & PARAMETRI
+# -----------------------------------------------------------------------------
+SEED = 42
+NUM_CLASSES = 19              # Classi Cityscapes
+IMG_SIZE = (1024, 1024)       # Risoluzione input/output coerente col training
+NUM_QUERIES = 100
+NUM_BLOCKS = 3
+BACKBONE_NAME = "vit_base_patch14_reg4_dinov2"
+
+# Setup riproducibilità
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
-# Image size should match training resolution (1024x1024 for OE+Energy training)
-IMG_SIZE = (1024, 1024)
-
+# Trasformazioni Input/Target
 input_transform = Compose([
     Resize(IMG_SIZE, Image.BILINEAR),
     ToTensor(),
@@ -40,458 +53,273 @@ target_transform = Compose([
     Resize(IMG_SIZE, Image.NEAREST),
 ])
 
+# -----------------------------------------------------------------------------
+# FUNZIONI DI UTILITÀ
+# -----------------------------------------------------------------------------
 
-def load_eomt_model(
-    checkpoint_path: str,
-    num_classes: int = 19,
-    img_size: tuple = (1024, 1024),
-    num_blocks: int = 3,
-    device: str = "cuda",
-    temperature: float = 1.0,
-):
+def fpr_at_95_tpr(scores: np.ndarray, labels: np.ndarray) -> float:
     """
-    Load EoMT model from checkpoint.
+    Calcola il False Positive Rate (FPR) quando il True Positive Rate (TPR) è al 95%.
     
     Args:
-        checkpoint_path: Path to model checkpoint
-        num_classes: Number of classes (19 for Cityscapes)
-        img_size: Input image size (should match training resolution)
-        num_blocks: Number of decoder blocks (3 for base model)
-        device: Device to load model on
-        temperature: Temperature for confidence calibration (post-training)
-        
-    Returns:
-        Tuple of (model, temperature)
+        scores: array dei punteggi di anomalia.
+        labels: array binario delle etichette (1 = anomalia, 0 = in-distribution).
     """
-    # Initialize encoder (DINOv2 backbone)
-    from models.vit import ViT
-    encoder = ViT(
-        backbone_name="vit_base_patch14_reg4_dinov2",
-        img_size=img_size,
-    )
+    fpr, tpr, _ = roc_curve(labels, scores, pos_label=1)
     
-    # Initialize EoMT model with correct parameters
-    model = EoMT(
+    # Trova gli indici dove il TPR supera il 95%
+    idxs = np.where(tpr >= 0.95)[0]
+    
+    if len(idxs) == 0:
+        return 1.0  # Fallback pessimistico se non si raggiunge il target TPR
+
+    return float(fpr[idxs[0]])
+
+def load_eomt_model(ckpt_path: str, device: torch.device) -> EoMT:
+    """
+    Inizializza l'architettura EoMT (Backbone ViT + Decoder) e carica i pesi
+    usando la logica del LightningModule originale.
+    """
+    print(f"--> Inizializzazione Backbone: {BACKBONE_NAME}")
+    encoder = ViT(img_size=IMG_SIZE, backbone_name=BACKBONE_NAME)
+
+    print(f"--> Inizializzazione EoMT Network (Classes: {NUM_CLASSES}, Queries: {NUM_QUERIES})")
+    network = EoMT(
         encoder=encoder,
-        num_classes=num_classes,
-        num_q=100,
-        num_blocks=num_blocks,
+        num_classes=NUM_CLASSES,
+        num_q=NUM_QUERIES,
+        num_blocks=NUM_BLOCKS,
         masked_attn_enabled=True,
     )
+
+    # Utilizziamo il LightningModule come wrapper per il caricamento sicuro dei pesi
+    lm = LightningModule(
+        network=network,
+        img_size=IMG_SIZE,
+        num_classes=NUM_CLASSES,
+        attn_mask_annealing_enabled=False,
+        attn_mask_annealing_start_steps=None,
+        attn_mask_annealing_end_steps=None,
+        lr=1e-4,
+        llrd=0.8,
+        llrd_l2_enabled=True,
+        lr_mult=1.0,
+        weight_decay=0.05,
+        poly_power=0.9,
+        warmup_steps=(500, 1000),
+        ckpt_path=ckpt_path,
+        delta_weights=False,
+        load_ckpt_class_head=True,
+    )
+
+    model = lm.network
+    model.to(device)
+    model.eval()
+    return model
+
+def compute_anomaly_map(logits: torch.Tensor, method: str, temperature: float = 1.0) -> torch.Tensor:
+    """
+    Genera una mappa di anomalia pixel-wise a partire dai logits semantici.
     
-    # Load checkpoint
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        else:
-            state_dict = checkpoint
-            
-        # Remove "network." prefix if present
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            if k.startswith("network."):
-                new_state_dict[k[8:]] = v
-            else:
-                new_state_dict[k] = v
-                
-        model.load_state_dict(new_state_dict, strict=False)
-        print(f"✅ Loaded checkpoint from {checkpoint_path}")
-        print(f"   Image size: {img_size}, Num blocks: {num_blocks}, Temperature: {temperature}")
+    Args:
+        logits: Tensore [C, H, W]
+        method: Strategia di scoring ('msp', 'maxlogit', 'maxentropy', 'rba')
+        temperature: Temperature scaling factor
+    """
+    # Apply temperature scaling
+    logits_scaled = logits / temperature
+    probs = F.softmax(logits_scaled, dim=0)
+
+    if method == "msp":
+        # Maximum Softmax Probability: Score = 1 - max(P(y|x))
+        msp = probs.max(dim=0).values
+        anomaly_map = 1.0 - msp
+
+    elif method == "maxlogit":
+        # Max Logit: Score = -max(Logits)
+        maxlogit = logits_scaled.max(dim=0).values
+        anomaly_map = -maxlogit
+
+    elif method == "maxentropy":
+        # Entropia: Score = H(P(y|x))
+        eps = 1e-8
+        entropy = -(probs * (probs + eps).log()).sum(dim=0)
+        anomaly_map = entropy
+
+    elif method == "rba":
+        # Reject-Based Acceptance
+        anomaly_map = -logits_scaled.tanh().sum(dim=0)
+
     else:
-        print(f"⚠️  Warning: Checkpoint not found at {checkpoint_path}")
-    
-    model = model.to(device)
-    model.eval()
-    return model, temperature
+        raise ValueError(f"Metodo anomalia non supportato: {method}")
 
+    return anomaly_map
 
-def compute_anomaly_score_msp(mask_logits, class_logits, temperature=1.0):
-    """
-    Compute anomaly score using Maximum Softmax Probability (MSP).
-    
-    Args:
-        mask_logits: Mask logits of shape (batch, num_queries, H, W)
-        class_logits: Class logits of shape (batch, num_queries, num_classes + 1)
-        temperature: Temperature for calibration (default: 1.0)
-        
-    Returns:
-        Anomaly score map of shape (batch, H, W)
-    """
-    # Apply temperature scaling
-    class_logits_scaled = class_logits / temperature
-    
-    # Convert to per-pixel logits
-    mask_probs = mask_logits.sigmoid()  # (batch, num_queries, H, W)
-    class_probs = class_logits_scaled.softmax(dim=-1)  # (batch, num_queries, num_classes + 1)
-    
-    # Remove "no object" class (last class)
-    class_probs = class_probs[..., :-1]  # (batch, num_queries, num_classes)
-    
-    # Compute per-pixel class probabilities
-    per_pixel_probs = torch.einsum("bqhw, bqc -> bchw", mask_probs, class_probs)
-    # per_pixel_probs: (batch, num_classes, H, W)
-    
-    # Maximum probability per pixel
-    max_probs = per_pixel_probs.max(dim=1)[0]  # (batch, H, W)
-    
-    # Anomaly score = 1 - max_probability
-    anomaly_score = 1.0 - max_probs
-    
-    return anomaly_score
-
-
-def compute_anomaly_score_max_logit(mask_logits, class_logits, temperature=1.0):
-    """
-    Compute anomaly score using Maximum Logit.
-    
-    Args:
-        mask_logits: Mask logits of shape (batch, num_queries, H, W)
-        class_logits: Class logits of shape (batch, num_queries, num_classes + 1)
-        temperature: Temperature for calibration (default: 1.0)
-        
-    Returns:
-        Anomaly score map of shape (batch, H, W)
-    """
-    # Apply temperature scaling
-    class_logits_scaled = class_logits / temperature
-    
-    # Convert to per-pixel logits
-    mask_probs = mask_logits.sigmoid()  # (batch, num_queries, H, W)
-    class_logits_clean = class_logits_scaled[..., :-1]  # Remove "no object" class
-    
-    # Compute per-pixel class logits
-    per_pixel_logits = torch.einsum("bqhw, bqc -> bchw", mask_probs, class_logits_clean)
-    # per_pixel_logits: (batch, num_classes, H, W)
-    
-    # Maximum logit per pixel
-    max_logits = per_pixel_logits.max(dim=1)[0]  # (batch, H, W)
-    
-    # Normalize to [0, 1] range for anomaly score
-    # Use negative of max logit as anomaly score (lower confidence = higher anomaly)
-    max_logits_norm = torch.sigmoid(-max_logits)
-    
-    return max_logits_norm
-
-
-def compute_anomaly_score_rba(mask_logits, class_logits, temperature=1.0):
-    """
-    Compute anomaly score using Rejected by All (RbA) method.
-    
-    RbA considers a pixel anomalous if it is rejected (low probability) by all queries.
-    
-    Args:
-        mask_logits: Mask logits of shape (batch, num_queries, H, W)
-        class_logits: Class logits of shape (batch, num_queries, num_classes + 1)
-        temperature: Temperature for calibration (default: 1.0)
-        
-    Returns:
-        Anomaly score map of shape (batch, H, W)
-    """
-    # Apply temperature scaling
-    class_logits_scaled = class_logits / temperature
-    
-    # Mask probabilities
-    mask_probs = mask_logits.sigmoid()  # (batch, num_queries, H, W)
-    
-    # Class probabilities (excluding "no object")
-    class_probs = class_logits_scaled.softmax(dim=-1)[..., :-1]  # (batch, num_queries, num_classes)
-    
-    # For each query, compute the maximum class probability
-    max_class_probs = class_probs.max(dim=-1)[0]  # (batch, num_queries)
-    
-    # Weight by mask probability
-    query_scores = mask_probs * max_class_probs.unsqueeze(-1).unsqueeze(-1)
-    # query_scores: (batch, num_queries, H, W)
-    
-    # Pixel is anomalous if rejected by all queries (all scores are low)
-    # Anomaly score = 1 - max(query_scores) across queries
-    max_query_scores = query_scores.max(dim=1)[0]  # (batch, H, W)
-    anomaly_score = 1.0 - max_query_scores
-    
-    return anomaly_score
-
-
-def evaluate_dataset(
-    model,
-    image_paths,
-    method="msp",
-    device="cuda",
-    temperature=1.0,
-):
-    """
-    Evaluate model on a dataset.
-    
-    Args:
-        model: EoMT model
-        image_paths: List of image paths
-        method: Anomaly detection method ("msp", "max_logit", "rba")
-        device: Device to run inference on
-        temperature: Temperature for confidence calibration
-        
-    Returns:
-        Tuple of (anomaly_scores, ground_truths)
-    """
-    anomaly_scores_list = []
-    ground_truths_list = []
-    
-    model.eval()
-    
-    num_processed = 0
-    num_skipped_no_gt = 0
-    num_skipped_no_anomaly = 0
-    
-    with torch.no_grad():
-        for img_idx, img_path in enumerate(image_paths):
-            if (img_idx + 1) % 10 == 0:
-                print(f"  Processing {img_idx + 1}/{len(image_paths)}...", end='\r')
-            # Load and preprocess image
-            img = Image.open(img_path).convert("RGB")
-            img_tensor = input_transform(img).unsqueeze(0).to(device)
-            
-            # Forward pass
-            mask_logits_per_layer, class_logits_per_layer = model(img_tensor / 255.0)
-            
-            # Use the final layer predictions
-            mask_logits = mask_logits_per_layer[-1]  # (batch, num_queries, H, W)
-            class_logits = class_logits_per_layer[-1]  # (batch, num_queries, num_classes + 1)
-            
-            # Interpolate to original image size
-            original_size = img.size[::-1]  # (H, W)
-            mask_logits = F.interpolate(
-                mask_logits,
-                size=original_size,
-                mode="bilinear",
-                align_corners=False,
-            )
-            
-            # Compute anomaly score with temperature scaling
-            if method == "msp":
-                anomaly_score = compute_anomaly_score_msp(mask_logits, class_logits, temperature)
-            elif method == "max_logit":
-                anomaly_score = compute_anomaly_score_max_logit(mask_logits, class_logits, temperature)
-            elif method == "rba":
-                anomaly_score = compute_anomaly_score_rba(mask_logits, class_logits, temperature)
-            else:
-                raise ValueError(f"Unknown method: {method}")
-            
-            # Load ground truth
-            gt_path = img_path.replace("images", "labels_masks")
-            if "RoadObsticle21" in gt_path:
-                gt_path = gt_path.replace("webp", "png")
-            elif "fs_static" in gt_path:
-                gt_path = gt_path.replace("jpg", "png")
-            elif "RoadAnomaly" in gt_path:
-                gt_path = gt_path.replace("jpg", "png")
-            
-            if not os.path.exists(gt_path):
-                num_skipped_no_gt += 1
-                continue
-            
-            if os.path.exists(gt_path):
-                gt_mask = Image.open(gt_path)
-                gt_mask = target_transform(gt_mask)
-                gt_array = np.array(gt_mask)
-                
-                # Normalize ground truth to binary (0 = normal, 1 = anomaly)
-                if "RoadAnomaly" in gt_path:
-                    gt_array = np.where(gt_array == 2, 1, 0)
-                elif "LostAndFound" in gt_path:
-                    gt_array = np.where(gt_array == 0, 255, gt_array)
-                    gt_array = np.where(gt_array == 1, 0, gt_array)
-                    gt_array = np.where((gt_array > 1) & (gt_array < 201), 1, gt_array)
-                    gt_array = np.where(gt_array == 255, 0, gt_array)
-                elif "Streethazard" in gt_path:
-                    gt_array = np.where(gt_array == 14, 255, gt_array)
-                    gt_array = np.where(gt_array < 20, 0, gt_array)
-                    gt_array = np.where(gt_array == 255, 1, gt_array)
-                else:
-                    # Binary: 0 = normal, 1 = anomaly
-                    gt_array = np.where(gt_array > 0, 1, 0)
-                
-                # Skip if no anomalies in ground truth
-                if 1 not in np.unique(gt_array):
-                    num_skipped_no_anomaly += 1
-                    continue
-                
-                # Resize anomaly score to match ground truth
-                anomaly_score_np = anomaly_score[0].cpu().numpy()
-                if anomaly_score_np.shape != gt_array.shape:
-                    from scipy.ndimage import zoom
-                    zoom_factors = (
-                        gt_array.shape[0] / anomaly_score_np.shape[0],
-                        gt_array.shape[1] / anomaly_score_np.shape[1],
-                    )
-                    anomaly_score_np = zoom(anomaly_score_np, zoom_factors, order=1)
-                
-                anomaly_scores_list.append(anomaly_score_np)
-                ground_truths_list.append(gt_array)
-                num_processed += 1
-    
-    print(f"\n  ✅ Processed: {num_processed} images")
-    print(f"  ⚠️  Skipped (no GT): {num_skipped_no_gt} images")
-    print(f"  ⚠️  Skipped (no anomaly): {num_skipped_no_anomaly} images")
-    
-    return anomaly_scores_list, ground_truths_list
-
-
-def compute_metrics(anomaly_scores_list, ground_truths_list):
-    """
-    Compute AuPRC and FPR95 metrics.
-    
-    Args:
-        anomaly_scores_list: List of anomaly score maps
-        ground_truths_list: List of ground truth masks
-        
-    Returns:
-        Dictionary with metrics (None if no data)
-    """
-    # Check if we have any data
-    if len(anomaly_scores_list) == 0 or len(ground_truths_list) == 0:
-        print("  🔴 ERROR: No valid samples found for evaluation!")
-        print("     Check:")
-        print("     1. Ground truth path mapping (images → labels_masks)")
-        print("     2. File extensions (.jpg, .webp, .png)")
-        print("     3. Ground truth files exist")
-        return None
-    
-    # Flatten all scores and ground truths
-    all_scores = []
-    all_labels = []
-    
-    for scores, labels in zip(anomaly_scores_list, ground_truths_list):
-        all_scores.extend(scores.flatten())
-        all_labels.extend(labels.flatten())
-    
-    all_scores = np.array(all_scores)
-    all_labels = np.array(all_labels)
-    
-    # Check if we have both classes
-    unique_labels = np.unique(all_labels)
-    if len(unique_labels) < 2:
-        print(f"  ⚠️  WARNING: Only one class found in ground truth: {unique_labels}")
-        return None
-    
-    # Compute AuPRC
-    auprc = average_precision_score(all_labels, all_scores)
-    
-    # Compute FPR95
-    fpr95 = fpr_at_95_tpr(all_scores, all_labels)
-    
-    return {
-        "auprc": auprc * 100.0,
-        "fpr95": fpr95 * 100.0,
-    }
-
-
+# -----------------------------------------------------------------------------
+# MAIN LOOP
+# -----------------------------------------------------------------------------
 def main():
     parser = ArgumentParser()
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
-        help="Path to EoMT checkpoint",
-    )
-    parser.add_argument(
-        "--input",
-        type=str,
-        required=True,
-        help="Glob pattern for input images (e.g., 'path/to/dataset/images/*.jpg')",
-    )
-    parser.add_argument(
-        "--method",
-        type=str,
-        default="msp",
-        choices=["msp", "max_logit", "rba"],
-        help="Anomaly detection method",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="results.txt",
-        help="Output file for results",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device to run inference on",
-    )
-    parser.add_argument(
-        "--img_size",
-        type=int,
-        default=1024,
-        help="Input image size (should match training resolution)",
-    )
-    parser.add_argument(
-        "--num_blocks",
-        type=int,
-        default=3,
-        help="Number of decoder blocks in EoMT model",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=1.0,
-        help="Temperature for confidence calibration (tune on validation set)",
-    )
+    parser.add_argument("--input", nargs="+", required=True, help="Path o glob pattern immagini input")
+    parser.add_argument("--loadDir", default="../trained_models/", help="Cartella dei modelli salvati")
+    parser.add_argument("--loadWeights", default="eomt_cityscapes.bin", help="Nome file checkpoint")
+    parser.add_argument("--method", default="msp", choices=["msp", "maxlogit", "maxentropy", "rba"], help="Metodo score anomalia")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Temperature scaling for calibration")
+    parser.add_argument("--output", default="results.txt", help="Output file for results")
+    parser.add_argument("--cpu", action="store_true", help="Forza esecuzione su CPU")
     args = parser.parse_args()
-    
-    # Update global image size transforms
-    global input_transform, target_transform, IMG_SIZE
-    IMG_SIZE = (args.img_size, args.img_size)
-    input_transform = Compose([
-        Resize(IMG_SIZE, Image.BILINEAR),
-        ToTensor(),
-    ])
-    target_transform = Compose([
-        Resize(IMG_SIZE, Image.NEAREST),
-    ])
-    
-    # Load model
-    print(f"Loading model from {args.checkpoint}")
-    model, temperature = load_eomt_model(
-        args.checkpoint,
-        img_size=IMG_SIZE,
-        num_blocks=args.num_blocks,
-        device=args.device,
-        temperature=args.temperature,
-    )
-    
-    # Get image paths
-    image_paths = sorted(glob.glob(os.path.expanduser(args.input)))
-    print(f"Found {len(image_paths)} images")
-    
-    # Evaluate
-    print(f"Evaluating with method: {args.method}")
-    anomaly_scores, ground_truths = evaluate_dataset(
-        model,
-        image_paths,
-        method=args.method,
-        device=args.device,
-        temperature=temperature,
-    )
-    
-    # Compute metrics
-    metrics = compute_metrics(anomaly_scores, ground_truths)
-    
-    # Print and save results
-    if metrics is not None:
-        print(f"\n✅ Results for {args.method}:")
-        print(f"   AuPRC: {metrics['auprc']:.2f}%")
-        print(f"   FPR95: {metrics['fpr95']:.2f}%")
-        
-        with open(args.output, "a") as f:
-            f.write(f"\n{args.method} - AuPRC: {metrics['auprc']:.2f}%, FPR95: {metrics['fpr95']:.2f}%\n")
-        
-        print(f"   Results saved to {args.output}")
-    else:
-        print(f"\n🔴 FAILED: Could not compute metrics for {args.method}")
-        print(f"   Check the warnings above for details.")
-        
-        with open(args.output, "a") as f:
-            f.write(f"\n{args.method} - FAILED (no valid samples)\n")
 
+    # Configurazione Device
+    device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
+    print(f"Device in uso: {device}")
+    print(f"Temperature: {args.temperature}")
+
+    # Preparazione file output
+    if not os.path.exists(args.output):
+        open(args.output, "w").close()
+    
+    ckpt_full_path = os.path.join(args.loadDir, args.loadWeights)
+    print(f"Caricamento pesi da: {ckpt_full_path}")
+
+    # Caricamento Modello
+    try:
+        model = load_eomt_model(ckpt_full_path, device)
+        print("✅ Modello caricato con successo.")
+    except Exception as e:
+        print(f"🔴 Errore critico nel caricamento del modello: {e}")
+        return
+
+    # Liste per accumulo risultati
+    anomaly_score_list = []
+    ood_gts_list = []
+    
+    file_list = glob.glob(os.path.expanduser(str(args.input[0])))
+    print(f"Trovate {len(file_list)} immagini da elaborare.")
+
+    if len(file_list) == 0:
+        print("🔴 ERRORE: Nessuna immagine trovata! Controlla il path.")
+        return
+
+    # -------------------------------------------------------------------------
+    # INIZIO ELABORAZIONE BATCH
+    # -------------------------------------------------------------------------
+    num_processed = 0
+    num_skipped = 0
+    
+    for idx, path in enumerate(file_list):
+        if (idx + 1) % 10 == 0:
+            print(f"Processing {idx + 1}/{len(file_list)}...", end='\r')
+
+        # 1. Inferenza
+        img_pil = Image.open(path).convert("RGB")
+        img_tensor = input_transform(img_pil).unsqueeze(0).float().to(device)
+
+        with torch.no_grad():
+            # EoMT forward pass
+            mask_logits_layers, class_logits_layers = model(img_tensor)
+
+            # Estrazione output dall'ultimo layer
+            final_mask_logits = mask_logits_layers[-1]    # [B, Q, h, w]
+            final_class_logits = class_logits_layers[-1]  # [B, Q, C+1]
+
+            # Upsample alla risoluzione originale
+            final_mask_logits = F.interpolate(
+                final_mask_logits, size=IMG_SIZE, mode="bilinear", align_corners=False
+            )
+
+            # Conversione in Semantic Logits standard [B, C, H, W]
+            per_pixel_logits = LightningModule.to_per_pixel_logits_semantic(
+                final_mask_logits, final_class_logits
+            )
+            pixel_logits = per_pixel_logits[0] # Rimuovi batch dimension -> [C, H, W]
+
+            # Calcolo Mappa Anomalia
+            anomaly_map = compute_anomaly_map(pixel_logits, args.method, args.temperature)
+            anomaly_np = anomaly_map.detach().cpu().numpy()
+
+        # 2. Caricamento e Adattamento Ground Truth (Labels)
+        pathGT = path.replace("images", "labels_masks")
+        
+        # Gestione estensioni file specifiche per dataset
+        if "RoadObsticle21" in pathGT: pathGT = pathGT.replace("webp", "png")
+        if "fs_static" in pathGT: pathGT = pathGT.replace("jpg", "png")
+        if "RoadAnomaly" in pathGT: pathGT = pathGT.replace("jpg", "png")
+
+        try:
+            gt_img = Image.open(pathGT)
+        except FileNotFoundError:
+            num_skipped += 1
+            continue
+
+        gt_img = target_transform(gt_img)
+        ood_gts = np.array(gt_img)
+
+        # Mappatura Labels Dataset -> Formato Binario (0=In-Dist, 1=OOD, 255=Ignore)
+        if "RoadAnomaly" in pathGT:
+            ood_gts = np.where((ood_gts == 2), 1, ood_gts)
+        elif "LostAndFound" in pathGT:
+            ood_gts = np.where((ood_gts == 0), 255, ood_gts)
+            ood_gts = np.where((ood_gts == 1), 0, ood_gts)
+            ood_gts = np.where((ood_gts > 1) & (ood_gts < 201), 1, ood_gts)
+        elif "Streethazard" in pathGT:
+            ood_gts = np.where((ood_gts == 14), 255, ood_gts)
+            ood_gts = np.where((ood_gts < 20), 0, ood_gts)
+            ood_gts = np.where((ood_gts == 255), 1, ood_gts)
+
+        # Se l'immagine non contiene pixel OOD validi, la saltiamo
+        if 1 not in np.unique(ood_gts):
+            num_skipped += 1
+            continue
+
+        ood_gts_list.append(ood_gts)
+        anomaly_score_list.append(anomaly_np)
+        num_processed += 1
+
+        # Pulizia memoria GPU
+        del img_tensor, anomaly_map, pixel_logits
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    print(f"\n✅ Processate: {num_processed} immagini")
+    print(f"⚠️  Skippate: {num_skipped} immagini")
+
+    # -------------------------------------------------------------------------
+    # CALCOLO METRICHE FINALI
+    # -------------------------------------------------------------------------
+    if not ood_gts_list:
+        print("🔴 Nessun dato valido raccolto per la valutazione.")
+        return
+
+    print("Calcolo metriche in corso...")
+    
+    # Flattening array per calcolo globale
+    ood_gts_flat = np.array(ood_gts_list)
+    anomaly_scores_flat = np.array(anomaly_score_list)
+
+    # Maschere booleane
+    ood_mask = (ood_gts_flat == 1)
+    ind_mask = (ood_gts_flat == 0)
+
+    # Estrazione punteggi
+    ood_scores = anomaly_scores_flat[ood_mask]
+    ind_scores = anomaly_scores_flat[ind_mask]
+
+    # Creazione etichette per Sklearn
+    all_scores = np.concatenate((ind_scores, ood_scores))
+    all_labels = np.concatenate((np.zeros(len(ind_scores)), np.ones(len(ood_scores))))
+
+    # Metriche
+    auprc = average_precision_score(all_labels, all_scores)
+    fpr95 = fpr_at_95_tpr(all_scores, all_labels)
+
+    result_str = f"[EoMT-{args.method}-T{args.temperature}] AUPRC: {auprc * 100.0:.2f}% | FPR@95TPR: {fpr95 * 100.0:.2f}%"
+    print("\n" + "="*60)
+    print(result_str)
+    print("="*60 + "\n")
+
+    # Scrittura su file
+    with open(args.output, "a") as f:
+        f.write("\n" + result_str)
 
 if __name__ == "__main__":
     main()
