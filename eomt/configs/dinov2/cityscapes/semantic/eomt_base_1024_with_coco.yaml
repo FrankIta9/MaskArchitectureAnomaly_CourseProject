@@ -14,8 +14,8 @@ trainer:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: "/content/drive/MyDrive/eomt_checkpoints"
-        filename: "eomt_1024_coco_oe-{epoch:03d}-{val_mIoU:.4f}"
-        monitor: "val_mIoU"
+        filename: "eomt_1024_coco_oe-{epoch:03d}-{metrics/val_iou_all:.4f}"
+        monitor: "metrics/val_iou_all"  # Nome corretto della metrica mIoU
         mode: "max"
         save_top_k: 3
         save_last: true
