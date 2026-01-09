@@ -1,0 +1,40 @@
+# Configurazione per Anomaly Segmentation con EIM Loss
+# Usa i pesi pre-addestrati eomt_cityscapes.bin come punto di partenza
+
+trainer:
+  max_epochs: 107
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      resume: allow
+      project: "eomt"
+      name: "cityscapes_semantic_eomt_base_640_anomaly_eim"
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    # IMPORTANTE: Aggiungi il path ai tuoi pesi pre-addestrati
+    # Sostituisci /path/to/eomt_cityscapes.bin con il path reale
+    ckpt_path: "/path/to/eomt_cityscapes.bin"
+    
+    # Opzioni per fine-tuning:
+    # delta_weights: false  # false = carica tutti i pesi, true = solo delta weights
+    # load_ckpt_class_head: true  # true = carica anche la testa di classificazione
+    
+    attn_mask_annealing_enabled: True
+    attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    attn_mask_annealing_end_steps: [6634, 11609, 16585]
+    
+    # Learning rate (potresti voler ridurre se parti da pesi pre-addestrati)
+    lr: 1e-4
+    
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_base_patch14_reg4_dinov2
+data:
+  class_path: datasets.cityscapes_semantic.CityscapesSemantic

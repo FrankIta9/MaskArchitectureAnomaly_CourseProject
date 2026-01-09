@@ -17,6 +17,7 @@ from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss,
     Mask2FormerHungarianMatcher,
 )
+from training.enhanced_isotropy_loss import EnhancedIsotropyLoss
 
 
 class MaskClassificationLoss(Mask2FormerLoss):
@@ -30,6 +31,9 @@ class MaskClassificationLoss(Mask2FormerLoss):
         class_coefficient: float,
         num_labels: int,
         no_object_coefficient: float,
+        eim_enabled: bool = True,
+        eim_temperature: float = 1.0,
+        eim_weight: float = 0.1,
     ):
         nn.Module.__init__(self)
         self.num_points = num_points
@@ -50,6 +54,15 @@ class MaskClassificationLoss(Mask2FormerLoss):
             cost_dice=dice_coefficient,
             cost_class=class_coefficient,
         )
+        
+        # Enhanced Isotropy Maximization Loss
+        self.eim_enabled = eim_enabled
+        if eim_enabled:
+            self.eim_loss = EnhancedIsotropyLoss(
+                temperature=eim_temperature,
+                weight=eim_weight,
+                reduction="mean",
+            )
 
     @torch.compiler.disable
     def forward(
@@ -72,8 +85,14 @@ class MaskClassificationLoss(Mask2FormerLoss):
 
         loss_masks = self.loss_masks(masks_queries_logits, mask_labels, indices)
         loss_classes = self.loss_labels(class_queries_logits, class_labels, indices)
+        
+        # Add Enhanced Isotropy Maximization Loss
+        losses = {**loss_masks, **loss_classes}
+        if self.eim_enabled and class_queries_logits is not None:
+            eim_loss = self.eim_loss(class_queries_logits)
+            losses["eim"] = eim_loss
 
-        return {**loss_masks, **loss_classes}
+        return losses
 
     def loss_masks(self, masks_queries_logits, mask_labels, indices):
         loss_masks = super().loss_masks(masks_queries_logits, mask_labels, indices, 1)
@@ -107,6 +126,9 @@ class MaskClassificationLoss(Mask2FormerLoss):
                 weighted_loss = loss * self.dice_coefficient
             elif "cross_entropy" in loss_key:
                 weighted_loss = loss * self.class_coefficient
+            elif "eim" in loss_key:
+                # EIM loss is already weighted in the EnhancedIsotropyLoss class
+                weighted_loss = loss
             else:
                 raise ValueError(f"Unknown loss key: {loss_key}")
 

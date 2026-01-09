@@ -77,6 +77,9 @@ class MaskClassificationSemantic(LightningModule):
             class_coefficient=class_coefficient,
             num_labels=num_classes,
             no_object_coefficient=no_object_coefficient,
+            eim_enabled=True,  # Enable EIM loss for anomaly segmentation
+            eim_temperature=1.0,
+            eim_weight=0.1,
         )
 
         self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)
