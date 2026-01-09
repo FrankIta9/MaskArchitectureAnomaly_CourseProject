@@ -81,7 +81,12 @@ class MaskClassificationLoss(Mask2FormerLoss):
         masks_queries_logits: torch.Tensor,
         targets: List[dict],
         class_queries_logits: Optional[torch.Tensor] = None,
-    ):
+    ): 
+        if self.logit_norm_enabled and class_queries_logits is not None:
+            logits_noobj = class_queries_logits[..., :-1]                 # [B, Q, C]
+            norm = logits_noobj.norm(p=2, dim=-1, keepdim=True)  # [B, Q, 1]
+            class_queries_logits = class_queries_logits / (self.logit_norm_tau * (norm + self.logit_norm_eps))
+            
         mask_labels = [
             target["masks"].to(masks_queries_logits.dtype) for target in targets
         ]
