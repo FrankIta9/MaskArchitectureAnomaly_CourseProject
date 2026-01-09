@@ -1,9 +1,10 @@
-# Configurazione per Anomaly Segmentation con EIM Loss + COCO Outlier Exposure
-# Ottimizzata per A100 (40GB VRAM) - Training veloce ed efficace
-# Usa i pesi pre-addestrati eomt_cityscapes.bin (1024x1024) e COCO per Outlier Exposure
+# Configurazione FINALE per Anomaly Segmentation: Outlier Exposure PURO
+# Energy OOD Loss DISABILITATO (conflitto con OE, causava divergenza)
+# Segue approccio RbA paper: OE + loss standard + post-hoc methods
+# Ottimizzata per A100 (40GB VRAM)
 
 trainer:
-  max_epochs: 107
+  max_epochs: 50
   # A100: batch_size=4 + accumulation=2 per gestire memoria del backward pass
   # Backward pass usa PIÙ memoria del forward, serve accumulation
   accumulate_grad_batches: 2  # Effective batch_size = 4*2 = 8
@@ -26,7 +27,7 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "cityscapes_semantic_eomt_base_1024_coco_oe_a100"
+      name: "cityscapes_eomt_1024_OE_PURE_lr1e5_FINAL"
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
   init_args:
@@ -38,10 +39,15 @@ model:
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
     attn_mask_annealing_end_steps: [6634, 11609, 16585]
     
-    # Learning rate RIDOTTO per fine-tuning stabile con Outlier Exposure
-    # 1e-4 causava instabilità (loss crescente) con OE
-    # 5e-5 permette adattamento più graduale
-    lr: 5e-5
+    # Learning rate ULTRA-BASSO per fine-tuning gentile
+    # Preserva conoscenza pre-addestrata mentre OE insegna anomaly detection
+    lr: 1e-5
+    
+    # ENERGY OOD LOSS DISABILITATO
+    # Conflitto con Outlier Exposure: OE vuole "no object" per outlier,
+    # Energy loss penalizza questo comportamento → divergenza
+    # Soluzione: OE puro + post-hoc energy score all'inference
+    energy_ood_enabled: False
     
     network:
       class_path: models.eomt.EoMT
