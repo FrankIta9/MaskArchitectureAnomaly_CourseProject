@@ -17,7 +17,7 @@ from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss,
     Mask2FormerHungarianMatcher,
 )
-from training.enhanced_isotropy_loss import EnhancedIsotropyLoss
+from training.energy_ood_loss import EnergyOODLoss
 
 
 class MaskClassificationLoss(Mask2FormerLoss):
@@ -55,13 +55,12 @@ class MaskClassificationLoss(Mask2FormerLoss):
             cost_class=class_coefficient,
         )
         
-        # Enhanced Isotropy Maximization Loss
-        self.eim_enabled = eim_enabled
+        # Energy-Based OOD Loss (replaces EIM for better OE compatibility)
+        self.eim_enabled = eim_enabled  # Renamed but kept for compatibility
         if eim_enabled:
-            self.eim_loss = EnhancedIsotropyLoss(
+            self.energy_ood_loss = EnergyOODLoss(
                 temperature=eim_temperature,
                 weight=eim_weight,
-                reduction="mean",
             )
 
     @torch.compiler.disable
@@ -86,11 +85,11 @@ class MaskClassificationLoss(Mask2FormerLoss):
         loss_masks = self.loss_masks(masks_queries_logits, mask_labels, indices)
         loss_classes = self.loss_labels(class_queries_logits, class_labels, indices)
         
-        # Add Enhanced Isotropy Maximization Loss
+        # Add Energy-Based OOD Loss
         losses = {**loss_masks, **loss_classes}
         if self.eim_enabled and class_queries_logits is not None:
-            eim_loss = self.eim_loss(class_queries_logits)
-            losses["eim"] = eim_loss
+            energy_loss = self.energy_ood_loss(class_queries_logits)
+            losses["eim"] = energy_loss  # Keep "eim" key for compatibility with logging
 
         return losses
 
