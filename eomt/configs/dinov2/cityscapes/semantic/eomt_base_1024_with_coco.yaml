@@ -1,16 +1,18 @@
 # Configurazione per Anomaly Segmentation con EIM Loss + COCO Outlier Exposure
+# Ottimizzata per A100 (40GB VRAM) - Training veloce ed efficace
 # Usa i pesi pre-addestrati eomt_cityscapes.bin (1024x1024) e COCO per Outlier Exposure
 
 trainer:
   max_epochs: 107
-  # Accumula gradienti per simulare batch_size più grande (evita OOM)
-  accumulate_grad_batches: 4
+  # A100: nessun gradient accumulation necessario, batch_size grande direttamente
+  # Questo rende il training molto più veloce (no overhead di accumulation)
+  precision: "16-mixed"  # AMP per velocità
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
       resume: allow
       project: "eomt"
-      name: "cityscapes_semantic_eomt_base_1024_coco_oe"
+      name: "cityscapes_semantic_eomt_base_1024_coco_oe_a100"
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
   init_args:
@@ -22,8 +24,9 @@ model:
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
     attn_mask_annealing_end_steps: [6634, 11609, 16585]
     
-    # Learning rate
-    lr: 1e-4
+    # Learning rate scalato per batch_size 16 (da 1e-4 con bs=8)
+    # Uso sqrt(2) scaling per batch_size 2x più grande
+    lr: 1.5e-4
     
     network:
       class_path: models.eomt.EoMT
@@ -40,10 +43,10 @@ data:
     # Path al dataset Cityscapes
     path: "/content/drive/MyDrive/Cityscapes"
     
-    # Batch size molto ridotto per immagini 1024x1024 con OE (evita OOM)
-    # Con accumulate_grad_batches=4, effective batch size = 2*4 = 8
-    batch_size: 2
-    num_workers: 4
+    # A100: batch_size ottimizzato per 40GB VRAM
+    # 16 immagini 1024x1024 con OE → training 8x più veloce rispetto a batch_size=2
+    batch_size: 16
+    num_workers: 8  # A100 ha CPU più potenti
     
     # IMPORTANTE: 1024x1024 per compatibilità con i pesi pre-addestrati
     img_size: [1024, 1024]
@@ -53,7 +56,7 @@ data:
     scale_range: [0.5, 2.0]
     check_empty_targets: true
     
-    # ===== CONFIGURAZIONE COCO OUTLIER EXPOSURE =====
+    # ===== CONFIGURAZIONE COCO OUTLIER EXPOSURE (Ottimizzata A100) =====
     # Path alla directory che contiene i file zip COCO
     # I file devono essere:
     #   - annotations_trainval2017.zip
@@ -61,16 +64,16 @@ data:
     #   - val2017.zip
     coco_path: "/content/drive/MyDrive/coco2017_zips"
     
-    # Split COCO da usare (val2017 è più piccolo, train2017 ha più oggetti)
-    coco_split: "val2017"  # o "train2017" per più dati
+    # A100: usa train2017 per maggiore diversità (118k immagini vs 5k di val)
+    coco_split: "train2017"
     
     # IMPORTANTE: true perché hai i file in formato zip
     use_coco_zip: true
     
-    # Parametri Outlier Exposure (leggermente ridotti per memoria)
-    paste_probability: 0.5      # Probabilità di applicare cut-paste (0.0-1.0)
+    # A100: parametri OE più aggressivi per migliore anomaly detection
+    paste_probability: 0.6      # Più oggetti outlier → migliore generalizzazione
     min_objects: 1              # Min oggetti da incollare per immagine
-    max_objects: 2              # Max oggetti da incollare per immagine
-    min_scale: 0.08             # Scala minima oggetti (8% dell'immagine)
-    max_scale: 0.25             # Scala massima oggetti (25% dell'immagine)
-    coco_min_area: 1000         # Area minima oggetti COCO in pixel
+    max_objects: 4              # Aumentato da 2 a 4 per più varietà
+    min_scale: 0.05             # Oggetti anche più piccoli
+    max_scale: 0.35             # Oggetti anche più grandi (35% dell'immagine)
+    coco_min_area: 800          # Ridotto per includere più oggetti
