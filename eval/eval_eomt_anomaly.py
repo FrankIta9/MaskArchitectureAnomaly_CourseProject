@@ -28,42 +28,54 @@ torch.manual_seed(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
+# Image size should match training resolution (1024x1024 for OE+Energy training)
+IMG_SIZE = (1024, 1024)
+
 input_transform = Compose([
-    Resize((640, 640), Image.BILINEAR),
+    Resize(IMG_SIZE, Image.BILINEAR),
     ToTensor(),
 ])
 
 target_transform = Compose([
-    Resize((640, 640), Image.NEAREST),
+    Resize(IMG_SIZE, Image.NEAREST),
 ])
 
 
-def load_eomt_model(checkpoint_path: str, num_classes: int = 19, device: str = "cuda"):
+def load_eomt_model(
+    checkpoint_path: str,
+    num_classes: int = 19,
+    img_size: tuple = (1024, 1024),
+    num_blocks: int = 3,
+    device: str = "cuda",
+    temperature: float = 1.0,
+):
     """
     Load EoMT model from checkpoint.
     
     Args:
         checkpoint_path: Path to model checkpoint
         num_classes: Number of classes (19 for Cityscapes)
+        img_size: Input image size (should match training resolution)
+        num_blocks: Number of decoder blocks (3 for base model)
         device: Device to load model on
+        temperature: Temperature for confidence calibration (post-training)
         
     Returns:
-        Loaded model
+        Tuple of (model, temperature)
     """
     # Initialize encoder (DINOv2 backbone)
-    from models.vit import ViTEncoder
-    encoder = ViTEncoder(
-        model_name="dinov2_vitb14",
-        img_size=(640, 640),
-        ckpt_path=None,
+    from models.vit import ViT
+    encoder = ViT(
+        backbone_name="vit_base_patch14_reg4_dinov2",
+        img_size=img_size,
     )
     
-    # Initialize EoMT model
+    # Initialize EoMT model with correct parameters
     model = EoMT(
         encoder=encoder,
         num_classes=num_classes,
         num_q=100,
-        num_blocks=4,
+        num_blocks=num_blocks,
         masked_attn_enabled=True,
     )
     
@@ -84,29 +96,34 @@ def load_eomt_model(checkpoint_path: str, num_classes: int = 19, device: str = "
                 new_state_dict[k] = v
                 
         model.load_state_dict(new_state_dict, strict=False)
-        print(f"Loaded checkpoint from {checkpoint_path}")
+        print(f"✅ Loaded checkpoint from {checkpoint_path}")
+        print(f"   Image size: {img_size}, Num blocks: {num_blocks}, Temperature: {temperature}")
     else:
-        print(f"Warning: Checkpoint not found at {checkpoint_path}, using pretrained weights")
+        print(f"⚠️  Warning: Checkpoint not found at {checkpoint_path}")
     
     model = model.to(device)
     model.eval()
-    return model
+    return model, temperature
 
 
-def compute_anomaly_score_msp(mask_logits, class_logits):
+def compute_anomaly_score_msp(mask_logits, class_logits, temperature=1.0):
     """
     Compute anomaly score using Maximum Softmax Probability (MSP).
     
     Args:
         mask_logits: Mask logits of shape (batch, num_queries, H, W)
         class_logits: Class logits of shape (batch, num_queries, num_classes + 1)
+        temperature: Temperature for calibration (default: 1.0)
         
     Returns:
         Anomaly score map of shape (batch, H, W)
     """
+    # Apply temperature scaling
+    class_logits_scaled = class_logits / temperature
+    
     # Convert to per-pixel logits
     mask_probs = mask_logits.sigmoid()  # (batch, num_queries, H, W)
-    class_probs = class_logits.softmax(dim=-1)  # (batch, num_queries, num_classes + 1)
+    class_probs = class_logits_scaled.softmax(dim=-1)  # (batch, num_queries, num_classes + 1)
     
     # Remove "no object" class (last class)
     class_probs = class_probs[..., :-1]  # (batch, num_queries, num_classes)
@@ -124,20 +141,24 @@ def compute_anomaly_score_msp(mask_logits, class_logits):
     return anomaly_score
 
 
-def compute_anomaly_score_max_logit(mask_logits, class_logits):
+def compute_anomaly_score_max_logit(mask_logits, class_logits, temperature=1.0):
     """
     Compute anomaly score using Maximum Logit.
     
     Args:
         mask_logits: Mask logits of shape (batch, num_queries, H, W)
         class_logits: Class logits of shape (batch, num_queries, num_classes + 1)
+        temperature: Temperature for calibration (default: 1.0)
         
     Returns:
         Anomaly score map of shape (batch, H, W)
     """
+    # Apply temperature scaling
+    class_logits_scaled = class_logits / temperature
+    
     # Convert to per-pixel logits
     mask_probs = mask_logits.sigmoid()  # (batch, num_queries, H, W)
-    class_logits_clean = class_logits[..., :-1]  # Remove "no object" class
+    class_logits_clean = class_logits_scaled[..., :-1]  # Remove "no object" class
     
     # Compute per-pixel class logits
     per_pixel_logits = torch.einsum("bqhw, bqc -> bchw", mask_probs, class_logits_clean)
@@ -153,7 +174,7 @@ def compute_anomaly_score_max_logit(mask_logits, class_logits):
     return max_logits_norm
 
 
-def compute_anomaly_score_rba(mask_logits, class_logits):
+def compute_anomaly_score_rba(mask_logits, class_logits, temperature=1.0):
     """
     Compute anomaly score using Rejected by All (RbA) method.
     
@@ -162,15 +183,19 @@ def compute_anomaly_score_rba(mask_logits, class_logits):
     Args:
         mask_logits: Mask logits of shape (batch, num_queries, H, W)
         class_logits: Class logits of shape (batch, num_queries, num_classes + 1)
+        temperature: Temperature for calibration (default: 1.0)
         
     Returns:
         Anomaly score map of shape (batch, H, W)
     """
+    # Apply temperature scaling
+    class_logits_scaled = class_logits / temperature
+    
     # Mask probabilities
     mask_probs = mask_logits.sigmoid()  # (batch, num_queries, H, W)
     
     # Class probabilities (excluding "no object")
-    class_probs = class_logits.softmax(dim=-1)[..., :-1]  # (batch, num_queries, num_classes)
+    class_probs = class_logits_scaled.softmax(dim=-1)[..., :-1]  # (batch, num_queries, num_classes)
     
     # For each query, compute the maximum class probability
     max_class_probs = class_probs.max(dim=-1)[0]  # (batch, num_queries)
@@ -192,6 +217,7 @@ def evaluate_dataset(
     image_paths,
     method="msp",
     device="cuda",
+    temperature=1.0,
 ):
     """
     Evaluate model on a dataset.
@@ -201,6 +227,7 @@ def evaluate_dataset(
         image_paths: List of image paths
         method: Anomaly detection method ("msp", "max_logit", "rba")
         device: Device to run inference on
+        temperature: Temperature for confidence calibration
         
     Returns:
         Tuple of (anomaly_scores, ground_truths)
@@ -232,13 +259,13 @@ def evaluate_dataset(
                 align_corners=False,
             )
             
-            # Compute anomaly score
+            # Compute anomaly score with temperature scaling
             if method == "msp":
-                anomaly_score = compute_anomaly_score_msp(mask_logits, class_logits)
+                anomaly_score = compute_anomaly_score_msp(mask_logits, class_logits, temperature)
             elif method == "max_logit":
-                anomaly_score = compute_anomaly_score_max_logit(mask_logits, class_logits)
+                anomaly_score = compute_anomaly_score_max_logit(mask_logits, class_logits, temperature)
             elif method == "rba":
-                anomaly_score = compute_anomaly_score_rba(mask_logits, class_logits)
+                anomaly_score = compute_anomaly_score_rba(mask_logits, class_logits, temperature)
             else:
                 raise ValueError(f"Unknown method: {method}")
             
@@ -359,11 +386,46 @@ def main():
         default="cuda",
         help="Device to run inference on",
     )
+    parser.add_argument(
+        "--img_size",
+        type=int,
+        default=1024,
+        help="Input image size (should match training resolution)",
+    )
+    parser.add_argument(
+        "--num_blocks",
+        type=int,
+        default=3,
+        help="Number of decoder blocks in EoMT model",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for confidence calibration (tune on validation set)",
+    )
     args = parser.parse_args()
+    
+    # Update global image size transforms
+    global input_transform, target_transform, IMG_SIZE
+    IMG_SIZE = (args.img_size, args.img_size)
+    input_transform = Compose([
+        Resize(IMG_SIZE, Image.BILINEAR),
+        ToTensor(),
+    ])
+    target_transform = Compose([
+        Resize(IMG_SIZE, Image.NEAREST),
+    ])
     
     # Load model
     print(f"Loading model from {args.checkpoint}")
-    model = load_eomt_model(args.checkpoint, device=args.device)
+    model, temperature = load_eomt_model(
+        args.checkpoint,
+        img_size=IMG_SIZE,
+        num_blocks=args.num_blocks,
+        device=args.device,
+        temperature=args.temperature,
+    )
     
     # Get image paths
     image_paths = sorted(glob.glob(os.path.expanduser(args.input)))
@@ -376,6 +438,7 @@ def main():
         image_paths,
         method=args.method,
         device=args.device,
+        temperature=temperature,
     )
     
     # Compute metrics
