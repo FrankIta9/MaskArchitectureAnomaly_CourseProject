@@ -123,36 +123,21 @@ class OutlierExposureTransform(nn.Module):
             x = max(0, min(x, w - new_w))
             y = max(0, min(y, h - new_h))
             
-            # Create anomaly mask (will be used as "no object" class)
-            anomaly_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
-            anomaly_mask[y:y+new_h, x:x+new_w] = obj_mask_resized
-            
-            # Blend object into image
+            # Blend object into image using the object mask
             img_clone = img.clone()
+            # Only blend where the mask is True
+            mask_float = obj_mask_resized.float()
             for c in range(3):
-                img_clone[c, y:y+new_h, x:x+new_w] = (
-                    self.blend_alpha * obj_img_resized[c] + 
-                    (1 - self.blend_alpha) * img_clone[c, y:y+new_h, x:x+new_w]
+                # Blend: alpha * obj + (1-alpha) * bg, but only where mask is True
+                blended = (
+                    self.blend_alpha * obj_img_resized[c] * mask_float + 
+                    (1 - self.blend_alpha * mask_float) * img_clone[c, y:y+new_h, x:x+new_w]
                 )
+                img_clone[c, y:y+new_h, x:x+new_w] = blended
             
-            # Add anomaly mask to target (as "no object" class = num_classes)
-            num_classes = target["labels"].max().item() if len(target["labels"]) > 0 else 0
-            anomaly_label = num_classes + 1  # Use "no object" class index
-            
-            # Append anomaly mask and label
-            existing_masks = target["masks"]
-            existing_labels = target["labels"]
-            existing_is_crowd = target.get("is_crowd", torch.zeros_like(existing_labels))
-            
-            new_masks = torch.cat([existing_masks, anomaly_mask.unsqueeze(0)], dim=0)
-            new_labels = torch.cat([existing_labels, torch.tensor([anomaly_label], device=existing_labels.device)])
-            new_is_crowd = torch.cat([existing_is_crowd, torch.tensor([False], device=existing_is_crowd.device)])
-            
-            target = {
-                "masks": new_masks,
-                "labels": new_labels,
-                "is_crowd": new_is_crowd,
-            }
+            # For Outlier Exposure: paste object visually but DON'T add to targets
+            # The model should learn to predict "no object" for these regions naturally
+            # This is the standard approach for OE in anomaly segmentation
             
             return img_clone, target
         
