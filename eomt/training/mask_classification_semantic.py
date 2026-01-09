@@ -79,7 +79,7 @@ class MaskClassificationSemantic(LightningModule):
             no_object_coefficient=no_object_coefficient,
             eim_enabled=True,  # ENABLED: Energy-based OOD (compatible with OE)
             eim_temperature=1.0,
-            eim_weight=0.05,  # Conservative weight for energy regularization
+            eim_weight=0.005,  # ULTRA-conservative (10x ridotto) per debugging
         )
 
         self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)
