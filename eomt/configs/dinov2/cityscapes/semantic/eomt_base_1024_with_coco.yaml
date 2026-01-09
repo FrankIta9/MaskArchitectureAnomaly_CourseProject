@@ -14,7 +14,7 @@ model:
   init_args:
     # IMPORTANTE: Aggiungi il path ai tuoi pesi pre-addestrati
     # Sostituisci /path/to/eomt_cityscapes.bin con il path reale
-    ckpt_path: "/path/to/eomt_cityscapes.bin"
+    ckpt_path: "/content/drive/MyDrive/eomt_cityscapes.bin"
     
     attn_mask_annealing_enabled: True
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
@@ -36,7 +36,7 @@ data:
   class_path: datasets.cityscapes_semantic_with_oe.CityscapesSemanticWithOE
   init_args:
     # Path al dataset Cityscapes
-    path: "/path/to/cityscapes"
+    path: "/content/drive/MyDrive/Cityscapes"
     
     # Batch size ridotto per immagini 1024x1024 (usano più memoria)
     batch_size: 8
