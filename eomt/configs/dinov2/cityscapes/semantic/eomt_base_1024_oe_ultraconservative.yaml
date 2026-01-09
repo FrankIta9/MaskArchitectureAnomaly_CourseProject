@@ -1,0 +1,115 @@
+# ============================================================================
+# CONFIGURAZIONE ULTRA-CONSERVATIVA: Outlier Exposure per Anomaly Detection
+# ============================================================================
+#
+# LEZIONI DA EPOCH 7 FALLITO:
+# - LR 1e-5 troppo alto → loss oscillante (3.2↔4.3)
+# - OE 25% paste_prob troppo aggressivo → overfitting su outlier
+# - Energy loss anche a 0.002 causa conflitto
+#
+# STRATEGIA NUOVA:
+# 1. LR ULTRA-BASSO: 2e-6 (5x più basso)
+# 2. OE GENTILE: 15% paste, 1 oggetto, scale ridotto
+# 3. WARMUP LUNGO: 20 epochs prima di qualsiasi perturbazione forte
+# 4. NO ENERGY: Solo loss standard (mask, dice, class)
+# 5. TRAINING BREVE: 50 epochs per test rapido
+#
+# OBIETTIVO:
+# - Convergenza SMOOTH (loss decrescente gradualmente)
+# - mIoU stabile 80-81%
+# - Miglioramento su TUTTI i dataset (no trade-off)
+#
+# ============================================================================
+
+trainer:
+  max_epochs: 50
+  
+  # Batch size conservativo per stabilità
+  accumulate_grad_batches: 2  # Effective batch_size = 4*2 = 8
+  precision: "16-mixed"
+  
+  # Checkpoint su Google Drive (nuova cartella per training pulito)
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: "/content/drive/MyDrive/eomt_oe_ultraconservative"
+        filename: "eomt_oe_v2-{epoch:03d}-{metrics/val_iou_all:.4f}"
+        monitor: "metrics/val_iou_all"
+        mode: "max"
+        save_top_k: 3
+        save_last: true
+        every_n_epochs: 1
+  
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      resume: allow
+      project: "eomt"
+      name: "OE_v2_UltraConservative_lr2e6_paste15"
+
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    # IMPORTANTE: Riparti da pesi Cityscapes PULITI
+    ckpt_path: "/content/drive/MyDrive/eomt_cityscapes.bin"
+    
+    attn_mask_annealing_enabled: True
+    attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    attn_mask_annealing_end_steps: [6634, 11609, 16585]
+    
+    # ===== LEARNING RATE ULTRA-BASSO =====
+    # 2e-6 = 5x più basso di 1e-5 (epoch 7 fallito)
+    # Preserva Cityscapes knowledge, adattamento lentissimo
+    lr: 2e-6
+    
+    # ===== ENERGY OOD DISABILITATO =====
+    # Conflitto dimostrato con OE anche a weight 0.002
+    # Strategia: Solo OE + loss standard
+    energy_ood_enabled: false
+    
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_base_patch14_reg4_dinov2
+
+data:
+  class_path: datasets.cityscapes_semantic_with_oe.CityscapesSemanticWithOE
+  init_args:
+    path: "/content/drive/MyDrive/Cityscapes"
+    
+    # Batch size ridotto per backward pass stability
+    batch_size: 4
+    num_workers: 8
+    
+    # 1024x1024 per compatibilità con pesi pre-addestrati
+    img_size: [1024, 1024]
+    
+    num_classes: 19
+    color_jitter_enabled: true
+    scale_range: [0.5, 2.0]
+    check_empty_targets: true
+    
+    # ===== OUTLIER EXPOSURE ULTRA-CONSERVATIVO =====
+    # Path COCO
+    coco_path: "/content/drive/MyDrive/coco2017_zips"
+    coco_split: "val2017"
+    use_coco_zip: true
+    
+    # PARAMETRI RIDOTTI per evitare overfitting su outlier
+    paste_probability: 0.15     # Era 0.25 → RIDOTTO
+    min_objects: 1              # Sempre 1 oggetto
+    max_objects: 1              # Era 2 → RIDOTTO a 1
+    min_scale: 0.08             # Era 0.10 → oggetti più piccoli
+    max_scale: 0.15             # Era 0.20 → RIDOTTO
+    coco_min_area: 1500         # Era 1200 → solo oggetti più grandi/definiti
+    
+    # MOTIVAZIONE PARAMETRI:
+    # - paste_prob 15%: solo 1 batch su 7 ha outlier (molto conservativo)
+    # - max_objects 1: un solo outlier per volta (più gentile)
+    # - scale ridotto: outlier meno invasivi, più "naturali"
+    # - area maggiore: solo oggetti ben definiti (no rumore)
