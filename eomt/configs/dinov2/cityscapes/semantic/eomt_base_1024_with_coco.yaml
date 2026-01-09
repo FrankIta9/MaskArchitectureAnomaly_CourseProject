@@ -4,9 +4,23 @@
 
 trainer:
   max_epochs: 107
-  # A100: nessun gradient accumulation necessario, batch_size grande direttamente
-  # Questo rende il training molto più veloce (no overhead di accumulation)
+  # A100: batch_size=4 + accumulation=2 per gestire memoria del backward pass
+  # Backward pass usa PIÙ memoria del forward, serve accumulation
+  accumulate_grad_batches: 2  # Effective batch_size = 4*2 = 8
   precision: "16-mixed"  # AMP per velocità
+  
+  # Checkpoint salvati su Google Drive
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: "/content/drive/MyDrive/eomt_checkpoints"
+        filename: "eomt_1024_coco_oe-{epoch:03d}-{val_mIoU:.4f}"
+        monitor: "val_mIoU"
+        mode: "max"
+        save_top_k: 3
+        save_last: true
+        every_n_epochs: 1
+  
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
@@ -43,10 +57,10 @@ data:
     # Path al dataset Cityscapes
     path: "/content/drive/MyDrive/Cityscapes"
     
-    # A100: batch_size SAFE per 40GB VRAM con 1024x1024
-    # 8 immagini 1024x1024 con OE → training 4x più veloce rispetto a batch_size=2
-    # Stesso effective batch size dell'originale (2*4), ma senza accumulation overhead
-    batch_size: 8
+    # A100: batch_size ridotto per backward pass (usa più memoria del forward)
+    # 4 immagini con accumulate=2 → effective batch_size=8
+    # Backward pass richiede MOLTA più memoria con 1024x1024 images
+    batch_size: 4
     num_workers: 8  # A100 ha CPU più potenti
     
     # IMPORTANTE: 1024x1024 per compatibilità con i pesi pre-addestrati
