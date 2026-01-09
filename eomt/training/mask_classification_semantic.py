@@ -41,6 +41,11 @@ class MaskClassificationSemantic(LightningModule):
         ckpt_path: Optional[str] = None,
         delta_weights: bool = False,
         load_ckpt_class_head: bool = True,
+        # Energy OOD Loss with Warmup parameters
+        energy_ood_enabled: bool = True,
+        energy_ood_max_weight: float = 0.002,
+        energy_warmup_epochs: int = 15,
+        max_epochs: int = 50,
     ):
         super().__init__(
             network=network,
@@ -77,12 +82,18 @@ class MaskClassificationSemantic(LightningModule):
             class_coefficient=class_coefficient,
             num_labels=num_classes,
             no_object_coefficient=no_object_coefficient,
-            eim_enabled=True,  # ENABLED: Energy-based OOD (compatible with OE)
+            eim_enabled=energy_ood_enabled,  # Energy OOD with warmup
             eim_temperature=1.0,
-            eim_weight=0.005,  # ULTRA-conservative (10x ridotto) per debugging
+            eim_weight=energy_ood_max_weight,  # Max weight after warmup
+            energy_warmup_epochs=energy_warmup_epochs,
+            max_epochs=max_epochs,
         )
 
         self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)
+    
+    def on_train_epoch_start(self):
+        """Update energy loss warmup scheduler with current epoch."""
+        self.criterion.set_epoch(self.current_epoch)
 
     def eval_step(
         self,

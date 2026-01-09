@@ -2,11 +2,13 @@
 # Energy-Based Out-of-Distribution Detection Loss
 # Based on: "Energy-based Out-of-distribution Detection" (NeurIPS 2020)
 # Adapted for Mask2Former-style segmentation with Outlier Exposure
+# WITH WARMUP SCHEDULER to avoid conflict with OE in early training
 # ---------------------------------------------------------------
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from typing import Optional
 
 
@@ -140,3 +142,113 @@ class EnergyOODLoss(nn.Module):
                 "energy_min": energy.min().item(),
                 "energy_max": energy.max().item(),
             }
+
+
+class EnergyOODLossWithWarmup(nn.Module):
+    """
+    Energy-Based OOD Loss with Warmup Scheduler.
+    
+    SOLVES CONFLICT WITH OUTLIER EXPOSURE:
+    - Phase 1 (epochs 0-warmup_epochs): Energy weight = 0 (DISABLED)
+      → Model learns via OE: COCO outliers → "no object" prediction
+      → No conflict, stable convergence
+    
+    - Phase 2 (epochs warmup_epochs-max_epochs): Energy weight gradually increases
+      → Model already knows outlier="no object", now refines energy separation
+      → Cosine warmup: 0 → max_weight
+    
+    This approach follows best practices:
+    1. Let OE teach outlier detection first (via standard losses)
+    2. Then add energy regularization to refine confidence calibration
+    3. Avoids early training instability from conflicting objectives
+    
+    Args:
+        base_loss: EnergyOODLoss instance (with max weight configured)
+        warmup_epochs: Number of epochs with energy disabled (default: 15)
+        max_epochs: Total training epochs (for cosine schedule)
+        warmup_schedule: "cosine" or "linear" (default: "cosine")
+    """
+    
+    def __init__(
+        self,
+        temperature: float = 1.0,
+        max_weight: float = 0.002,  # Conservative max weight
+        m_in: float = -25.0,
+        warmup_epochs: int = 15,
+        max_epochs: int = 50,
+        warmup_schedule: str = "cosine",
+    ):
+        super().__init__()
+        self.base_loss = EnergyOODLoss(
+            temperature=temperature,
+            weight=max_weight,  # This is the MAX weight after warmup
+            m_in=m_in,
+        )
+        self.warmup_epochs = warmup_epochs
+        self.max_epochs = max_epochs
+        self.warmup_schedule = warmup_schedule
+        self.max_weight = max_weight
+        self.current_epoch = 0
+        
+    def set_epoch(self, epoch: int):
+        """Update current epoch for warmup scheduling."""
+        self.current_epoch = epoch
+        
+    def get_current_weight(self) -> float:
+        """
+        Compute current energy weight based on warmup schedule.
+        
+        Returns:
+            Current weight (0.0 during warmup, then gradually increases)
+        """
+        if self.current_epoch < self.warmup_epochs:
+            # Phase 1: Energy DISABLED (pure OE training)
+            return 0.0
+        
+        # Phase 2: Gradual warmup
+        progress = (self.current_epoch - self.warmup_epochs) / (
+            self.max_epochs - self.warmup_epochs
+        )
+        progress = min(1.0, max(0.0, progress))  # Clamp [0, 1]
+        
+        if self.warmup_schedule == "cosine":
+            # Cosine warmup: smooth increase
+            weight = self.max_weight * (1 - math.cos(progress * math.pi)) / 2
+        else:  # linear
+            weight = self.max_weight * progress
+            
+        return weight
+        
+    def forward(
+        self,
+        class_logits: torch.Tensor,
+        target_labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Compute Energy loss with warmup.
+        
+        During warmup (epochs 0-warmup_epochs): returns 0.0
+        After warmup: gradually increases energy loss weight
+        """
+        current_weight = self.get_current_weight()
+        
+        if current_weight == 0.0:
+            # Warmup phase: return zero loss
+            return torch.tensor(0.0, device=class_logits.device)
+        
+        # Compute base energy loss
+        energy_loss = self.base_loss(class_logits, target_labels)
+        
+        # Scale by current warmup weight
+        # base_loss already applies self.base_loss.weight, so we need to adjust
+        scale_factor = current_weight / self.max_weight
+        
+        return energy_loss * scale_factor
+    
+    def get_energy_stats(self, class_logits: torch.Tensor) -> dict:
+        """Get energy statistics (delegates to base loss)."""
+        stats = self.base_loss.get_energy_stats(class_logits)
+        stats["energy_weight_current"] = self.get_current_weight()
+        stats["energy_weight_max"] = self.max_weight
+        stats["warmup_phase"] = "warmup" if self.current_epoch < self.warmup_epochs else "active"
+        return stats

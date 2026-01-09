@@ -1,6 +1,23 @@
-# Configurazione FINALE per Anomaly Segmentation: Outlier Exposure PURO
-# Energy OOD Loss DISABILITATO (conflitto con OE, causava divergenza)
-# Segue approccio RbA paper: OE + loss standard + post-hoc methods
+# ============================================================================
+# CONFIGURAZIONE FINALE: Outlier Exposure + Energy OOD con WARMUP SCHEDULER
+# ============================================================================
+#
+# SOLUZIONE AL CONFLITTO OE/Energy:
+# - Epochs 1-15: Energy DISABILITATO (weight=0), solo OE + loss standard
+#   → Modello impara: COCO outliers = "no object" class
+#   → Convergenza stabile, no conflitti
+#
+# - Epochs 16-50: Energy ATTIVATO gradualmente (cosine warmup 0→0.002)
+#   → Modello raffina: separazione energia ID/OOD
+#   → "No object" già appreso, energy non crea conflitto
+#
+# VANTAGGI:
+# ✅ Evita divergenza (loss crescente) vista con energy immediato
+# ✅ Preserva conoscenza Cityscapes (LR 1e-5 ultra-basso)
+# ✅ OE insegna outlier detection, Energy raffina confidence
+# ✅ Accademicamente solido (segue best practices)
+# ✅ Post-hoc: Energy score per anomaly detection all'inference
+#
 # Ottimizzata per A100 (40GB VRAM)
 
 trainer:
@@ -10,13 +27,13 @@ trainer:
   accumulate_grad_batches: 2  # Effective batch_size = 4*2 = 8
   precision: "16-mixed"  # AMP per velocità
   
-  # Checkpoint salvati su Google Drive
+  # Checkpoint salvati su Google Drive (nuova cartella per training pulito)
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: "/content/drive/MyDrive/eomt_checkpoints"
-        filename: "eomt_1024_coco_oe-{epoch:03d}-{metrics/val_iou_all:.4f}"
-        monitor: "metrics/val_iou_all"  # Nome corretto della metrica mIoU
+        dirpath: "/content/drive/MyDrive/eomt_checkpoints_warmup"
+        filename: "eomt_1024_oe_energy_warmup-{epoch:03d}-{metrics/val_iou_all:.4f}"
+        monitor: "metrics/val_iou_all"
         mode: "max"
         save_top_k: 3
         save_last: true
@@ -27,7 +44,7 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "cityscapes_eomt_1024_OE_PURE_lr1e5_FINAL"
+      name: "FINAL_OE+Energy_Warmup_lr1e5_cleanWeights"
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
   init_args:
@@ -43,11 +60,17 @@ model:
     # Preserva conoscenza pre-addestrata mentre OE insegna anomaly detection
     lr: 1e-5
     
-    # ENERGY OOD LOSS DISABILITATO
-    # Conflitto con Outlier Exposure: OE vuole "no object" per outlier,
-    # Energy loss penalizza questo comportamento → divergenza
-    # Soluzione: OE puro + post-hoc energy score all'inference
-    energy_ood_enabled: false
+    # ===== ENERGY OOD LOSS CON WARMUP SCHEDULER =====
+    # ABILITATO ma con strategia graduale per evitare conflitto con OE
+    energy_ood_enabled: true
+    energy_ood_max_weight: 0.002  # Max weight raggiunto dopo warmup (conservativo)
+    energy_warmup_epochs: 15      # Epochs 1-15: energy DISABILITATO (weight=0)
+    max_epochs: 50                # Total epochs (per warmup scheduler)
+    
+    # Come funziona:
+    # - Epochs 1-15: energy_weight = 0.0 (solo OE + loss standard)
+    # - Epochs 16-50: energy_weight aumenta 0.0 → 0.002 (cosine schedule)
+    # Risultato: no conflitto, convergenza stabile + energy refinement
     
     network:
       class_path: models.eomt.EoMT

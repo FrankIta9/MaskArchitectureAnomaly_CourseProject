@@ -17,7 +17,7 @@ from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss,
     Mask2FormerHungarianMatcher,
 )
-from training.energy_ood_loss import EnergyOODLoss
+from training.energy_ood_loss import EnergyOODLossWithWarmup
 
 
 class MaskClassificationLoss(Mask2FormerLoss):
@@ -33,7 +33,9 @@ class MaskClassificationLoss(Mask2FormerLoss):
         no_object_coefficient: float,
         eim_enabled: bool = True,
         eim_temperature: float = 1.0,
-        eim_weight: float = 0.1,
+        eim_weight: float = 0.002,  # Max weight after warmup
+        energy_warmup_epochs: int = 15,  # Epochs with energy disabled
+        max_epochs: int = 50,  # Total training epochs
     ):
         nn.Module.__init__(self)
         self.num_points = num_points
@@ -55,14 +57,24 @@ class MaskClassificationLoss(Mask2FormerLoss):
             cost_class=class_coefficient,
         )
         
-        # Energy-Based OOD Loss (replaces EIM for better OE compatibility)
-        self.eim_enabled = eim_enabled  # Renamed but kept for compatibility
+        # Energy-Based OOD Loss WITH WARMUP (avoids conflict with OE)
+        # Phase 1 (0-15 epochs): energy disabled, pure OE training
+        # Phase 2 (15+ epochs): energy gradually enabled for refinement
+        self.eim_enabled = eim_enabled  # Kept for compatibility
         if eim_enabled:
-            self.energy_ood_loss = EnergyOODLoss(
+            self.energy_ood_loss = EnergyOODLossWithWarmup(
                 temperature=eim_temperature,
-                weight=eim_weight,
+                max_weight=eim_weight,
+                warmup_epochs=energy_warmup_epochs,
+                max_epochs=max_epochs,
+                warmup_schedule="cosine",
             )
 
+    def set_epoch(self, epoch: int):
+        """Update current epoch for energy warmup scheduling."""
+        if self.eim_enabled:
+            self.energy_ood_loss.set_epoch(epoch)
+    
     @torch.compiler.disable
     def forward(
         self,
