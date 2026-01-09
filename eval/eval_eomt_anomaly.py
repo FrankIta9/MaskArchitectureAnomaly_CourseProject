@@ -237,8 +237,14 @@ def evaluate_dataset(
     
     model.eval()
     
+    num_processed = 0
+    num_skipped_no_gt = 0
+    num_skipped_no_anomaly = 0
+    
     with torch.no_grad():
-        for img_path in image_paths:
+        for img_idx, img_path in enumerate(image_paths):
+            if (img_idx + 1) % 10 == 0:
+                print(f"  Processing {img_idx + 1}/{len(image_paths)}...", end='\r')
             # Load and preprocess image
             img = Image.open(img_path).convert("RGB")
             img_tensor = input_transform(img).unsqueeze(0).to(device)
@@ -278,6 +284,10 @@ def evaluate_dataset(
             elif "RoadAnomaly" in gt_path:
                 gt_path = gt_path.replace("jpg", "png")
             
+            if not os.path.exists(gt_path):
+                num_skipped_no_gt += 1
+                continue
+            
             if os.path.exists(gt_path):
                 gt_mask = Image.open(gt_path)
                 gt_mask = target_transform(gt_mask)
@@ -301,6 +311,7 @@ def evaluate_dataset(
                 
                 # Skip if no anomalies in ground truth
                 if 1 not in np.unique(gt_array):
+                    num_skipped_no_anomaly += 1
                     continue
                 
                 # Resize anomaly score to match ground truth
@@ -315,6 +326,11 @@ def evaluate_dataset(
                 
                 anomaly_scores_list.append(anomaly_score_np)
                 ground_truths_list.append(gt_array)
+                num_processed += 1
+    
+    print(f"\n  ✅ Processed: {num_processed} images")
+    print(f"  ⚠️  Skipped (no GT): {num_skipped_no_gt} images")
+    print(f"  ⚠️  Skipped (no anomaly): {num_skipped_no_anomaly} images")
     
     return anomaly_scores_list, ground_truths_list
 
@@ -328,8 +344,17 @@ def compute_metrics(anomaly_scores_list, ground_truths_list):
         ground_truths_list: List of ground truth masks
         
     Returns:
-        Dictionary with metrics
+        Dictionary with metrics (None if no data)
     """
+    # Check if we have any data
+    if len(anomaly_scores_list) == 0 or len(ground_truths_list) == 0:
+        print("  🔴 ERROR: No valid samples found for evaluation!")
+        print("     Check:")
+        print("     1. Ground truth path mapping (images → labels_masks)")
+        print("     2. File extensions (.jpg, .webp, .png)")
+        print("     3. Ground truth files exist")
+        return None
+    
     # Flatten all scores and ground truths
     all_scores = []
     all_labels = []
@@ -340,6 +365,12 @@ def compute_metrics(anomaly_scores_list, ground_truths_list):
     
     all_scores = np.array(all_scores)
     all_labels = np.array(all_labels)
+    
+    # Check if we have both classes
+    unique_labels = np.unique(all_labels)
+    if len(unique_labels) < 2:
+        print(f"  ⚠️  WARNING: Only one class found in ground truth: {unique_labels}")
+        return None
     
     # Compute AuPRC
     auprc = average_precision_score(all_labels, all_scores)
@@ -445,14 +476,21 @@ def main():
     metrics = compute_metrics(anomaly_scores, ground_truths)
     
     # Print and save results
-    print(f"\nResults for {args.method}:")
-    print(f"AuPRC: {metrics['auprc']:.2f}%")
-    print(f"FPR95: {metrics['fpr95']:.2f}%")
-    
-    with open(args.output, "a") as f:
-        f.write(f"\n{args.method} - AuPRC: {metrics['auprc']:.2f}%, FPR95: {metrics['fpr95']:.2f}%\n")
-    
-    print(f"Results saved to {args.output}")
+    if metrics is not None:
+        print(f"\n✅ Results for {args.method}:")
+        print(f"   AuPRC: {metrics['auprc']:.2f}%")
+        print(f"   FPR95: {metrics['fpr95']:.2f}%")
+        
+        with open(args.output, "a") as f:
+            f.write(f"\n{args.method} - AuPRC: {metrics['auprc']:.2f}%, FPR95: {metrics['fpr95']:.2f}%\n")
+        
+        print(f"   Results saved to {args.output}")
+    else:
+        print(f"\n🔴 FAILED: Could not compute metrics for {args.method}")
+        print(f"   Check the warnings above for details.")
+        
+        with open(args.output, "a") as f:
+            f.write(f"\n{args.method} - FAILED (no valid samples)\n")
 
 
 if __name__ == "__main__":
