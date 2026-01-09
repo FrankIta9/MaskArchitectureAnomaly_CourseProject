@@ -11,7 +11,7 @@ from torchvision.transforms import v2 as T
 from torchvision.transforms.v2 import functional as F
 from torchvision.tv_tensors import wrap, TVTensor
 from torch import nn, Tensor
-from typing import Any, Union
+from typing import Any, Union, Optional
 
 
 class Transforms(nn.Module):
@@ -24,7 +24,12 @@ class Transforms(nn.Module):
         max_contrast_factor: float = 0.5,
         saturation_factor: float = 0.5,
         max_hue_delta: int = 18,
+        outlier_exposure_transform: Optional[nn.Module] = None,
     ):
+        """
+        Args:
+            outlier_exposure_transform: Optional OutlierExposureTransform to apply
+        """
         super().__init__()
 
         self.img_size = img_size
@@ -37,6 +42,9 @@ class Transforms(nn.Module):
         self.random_horizontal_flip = T.RandomHorizontalFlip()
         self.scale_jitter = T.ScaleJitter(target_size=img_size, scale_range=scale_range)
         self.random_crop = T.RandomCrop(img_size)
+        
+        # Outlier Exposure (optional)
+        self.outlier_exposure_transform = outlier_exposure_transform
 
     def _random_factor(self, factor: float, center: float = 1.0):
         return torch.empty(1).uniform_(center - factor, center + factor).item()
@@ -108,6 +116,11 @@ class Transforms(nn.Module):
         img, target = self.scale_jitter(img, target)
         img, target = self.pad(img, target)
         img, target = self.random_crop(img, target)
+        
+        # Apply Outlier Exposure (cut-paste) if enabled
+        # Apply before filtering to ensure anomaly masks are included
+        if self.outlier_exposure_transform is not None:
+            img, target = self.outlier_exposure_transform(img, target)
 
         valid = target["masks"].flatten(1).any(1)
         if not valid.any():
