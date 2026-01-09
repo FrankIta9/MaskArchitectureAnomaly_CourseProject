@@ -38,6 +38,10 @@ class MaskClassificationSemantic(LightningModule):
         class_coefficient: float = 2.0,
         mask_thresh: float = 0.8,
         overlap_thresh: float = 0.8,
+        # EIM (anomaly) loss controls
+        eim_enabled: bool = True,
+        eim_temperature: float = 1.0,
+        eim_weight: float = 0.03,
         ckpt_path: Optional[str] = None,
         delta_weights: bool = False,
         load_ckpt_class_head: bool = True,
@@ -77,9 +81,9 @@ class MaskClassificationSemantic(LightningModule):
             class_coefficient=class_coefficient,
             num_labels=num_classes,
             no_object_coefficient=no_object_coefficient,
-            eim_enabled=True,  # Enable EIM loss for anomaly segmentation
-            eim_temperature=1.0,
-            eim_weight=0.1,
+            eim_enabled=eim_enabled,
+            eim_temperature=eim_temperature,
+            eim_weight=eim_weight,
         )
 
         self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)

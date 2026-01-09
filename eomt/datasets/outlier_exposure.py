@@ -123,7 +123,11 @@ class OutlierExposureTransform(nn.Module):
             x = max(0, min(x, w - new_w))
             y = max(0, min(y, h - new_h))
             
-            # Blend object into image using the object mask
+            # Build full-image anomaly mask (same HxW as target masks)
+            anomaly_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
+            anomaly_mask[y : y + new_h, x : x + new_w] = obj_mask_resized
+
+            # Blend object into image using the object mask (local crop)
             img_clone = img.clone()
             # Only blend where the mask is True
             mask_float = obj_mask_resized.float()
@@ -135,10 +139,25 @@ class OutlierExposureTransform(nn.Module):
                 )
                 img_clone[c, y:y+new_h, x:x+new_w] = blended
             
-            # For Outlier Exposure: paste object visually but DON'T add to targets
-            # The model should learn to predict "no object" for these regions naturally
-            # This is the standard approach for OE in anomaly segmentation
-            
+            # IMPORTANT (stability): remove pasted pixels from Cityscapes supervision masks.
+            # If we keep original targets, those pixels would carry the *old* Cityscapes label
+            # while the image now shows a COCO object -> label noise -> unstable / rising loss.
+            if "masks" in target and target["masks"] is not None:
+                masks = target["masks"].to(dtype=torch.bool)
+                masks = masks & (~anomaly_mask.unsqueeze(0))
+
+                labels = target.get("labels", None)
+                is_crowd = target.get("is_crowd", None)
+
+                keep = masks.flatten(1).any(1)
+                target["masks"] = masks[keep]
+                if labels is not None:
+                    target["labels"] = labels[keep]
+                if is_crowd is not None:
+                    target["is_crowd"] = is_crowd[keep]
+
+            # NOTE: do not attach `anomaly_mask` to `target`, because downstream transforms
+            # filter all target keys assuming dim0 == num_instances; an HxW tensor here would crash.
             return img_clone, target
         
         return img, target
