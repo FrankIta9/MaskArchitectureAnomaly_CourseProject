@@ -30,7 +30,9 @@ Dovresti vedere:
 
 ## 📝 Step 2: Prepara il Config
 
-Ho creato un file di configurazione pronto: `eomt/configs/dinov2/cityscapes/semantic/eomt_base_640_with_coco.yaml`
+Ho creato due file di configurazione pronti:
+- `eomt/configs/dinov2/cityscapes/semantic/eomt_base_1024_with_coco.yaml` ✅ **CONSIGLIATO** (compatibile con pesi pre-addestrati)
+- `eomt/configs/dinov2/cityscapes/semantic/eomt_base_640_with_coco.yaml` (se vuoi usare 640x640 senza pesi)
 
 **Modifica queste righe nel file:**
 
@@ -51,25 +53,30 @@ coco_path: "/content/drive/MyDrive/coco2017_zips"  # ✅ Già corretto!
 
 ## 📝 Step 3: Avvia il Training
 
-### Opzione A: Usa il config pronto
+### Opzione A: Usa il config 1024x1024 (CONSIGLIATO - compatibile con pesi)
 
 ```bash
 cd eomt
 python main.py fit \
-    --config configs/dinov2/cityscapes/semantic/eomt_base_640_with_coco.yaml \
+    --config configs/dinov2/cityscapes/semantic/eomt_base_1024_with_coco.yaml \
     --model.ckpt_path /path/to/eomt_cityscapes.bin \
     --data.path /path/to/cityscapes
 ```
 
 ### Opzione B: Modifica il config e poi esegui
 
-1. Apri `eomt/configs/dinov2/cityscapes/semantic/eomt_base_640_with_coco.yaml`
+1. Apri `eomt/configs/dinov2/cityscapes/semantic/eomt_base_1024_with_coco.yaml`
 2. Modifica i path necessari
 3. Esegui:
 ```bash
 cd eomt
-python main.py fit --config configs/dinov2/cityscapes/semantic/eomt_base_640_with_coco.yaml
+python main.py fit --config configs/dinov2/cityscapes/semantic/eomt_base_1024_with_coco.yaml
 ```
+
+### ⚠️ Nota sulla dimensione immagine
+
+- **1024x1024**: Usa questo se hai i pesi pre-addestrati `eomt_cityscapes.bin`
+- **640x640**: Usa questo solo se parti da zero (senza checkpoint)
 
 ## ⚙️ Parametri COCO Configurati
 
@@ -144,13 +151,23 @@ pip install pycocotools
 
 ## 🎯 Comando Finale
 
+### Con pesi pre-addestrati (CONSIGLIATO):
+
+```bash
+cd eomt
+python main.py fit \
+    --config configs/dinov2/cityscapes/semantic/eomt_base_1024_with_coco.yaml \
+    --model.ckpt_path /path/to/eomt_cityscapes.bin \
+    --data.path /path/to/cityscapes
+```
+
+### Senza pesi pre-addestrati:
+
 ```bash
 cd eomt
 python main.py fit \
     --config configs/dinov2/cityscapes/semantic/eomt_base_640_with_coco.yaml \
-    --model.ckpt_path /path/to/eomt_cityscapes.bin \
-    --data.path /path/to/cityscapes \
-    --data.coco_path /content/drive/MyDrive/coco2017_zips
+    --data.path /path/to/cityscapes
 ```
 
 **Buon training! 🚀**
