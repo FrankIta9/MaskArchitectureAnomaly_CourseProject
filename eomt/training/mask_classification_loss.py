@@ -35,9 +35,15 @@ class MaskClassificationLoss(Mask2FormerLoss):
         eim_temperature: float = 1.0,
         eim_weight: float = 0.002,  # Max weight after warmup
         energy_warmup_epochs: int = 15,  # Epochs with energy disabled
+        logit_norm_enabled: bool = False,
+        logit_norm_tau: float = 0.04,
+        logit_norm_eps: float = 1e-6,
         max_epochs: int = 50,  # Total training epochs
     ):
         nn.Module.__init__(self)
+        self.logit_norm_enabled = logit_norm_enabled,
+        self.logit_norm_tau = logit_norm_tau,
+        self.logit_norm_eps = logit_norm_eps,
         self.num_points = num_points
         self.oversample_ratio = oversample_ratio
         self.importance_sample_ratio = importance_sample_ratio
@@ -86,7 +92,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
             logits_noobj = class_queries_logits[..., :-1]                 # [B, Q, C]
             norm = logits_noobj.norm(p=2, dim=-1, keepdim=True)  # [B, Q, 1]
             class_queries_logits = class_queries_logits / (self.logit_norm_tau * (norm + self.logit_norm_eps))
-            
+
         mask_labels = [
             target["masks"].to(masks_queries_logits.dtype) for target in targets
         ]
