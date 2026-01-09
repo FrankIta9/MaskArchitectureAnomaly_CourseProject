@@ -79,16 +79,17 @@ data:
     #   - val2017.zip
     coco_path: "/content/drive/MyDrive/coco2017_zips"
     
-    # A100: usa train2017 per maggiore diversità (118k immagini vs 5k di val)
-    coco_split: "train2017"
+    # A100: usa val2017 per OE più controllato (training instabile con train2017)
+    coco_split: "val2017"
     
     # IMPORTANTE: true perché hai i file in formato zip
     use_coco_zip: true
     
-    # A100: parametri OE più aggressivi per migliore anomaly detection
-    paste_probability: 0.6      # Più oggetti outlier → migliore generalizzazione
+    # Parametri OE RIDOTTI per stabilizzare training
+    # (train2017 + parametri aggressivi causavano loss instabile e mIoU drop)
+    paste_probability: 0.3      # Ridotto da 0.6: solo 30% batch ha outliers
     min_objects: 1              # Min oggetti da incollare per immagine
-    max_objects: 4              # Aumentato da 2 a 4 per più varietà
-    min_scale: 0.05             # Oggetti anche più piccoli
-    max_scale: 0.35             # Oggetti anche più grandi (35% dell'immagine)
-    coco_min_area: 800          # Ridotto per includere più oggetti
+    max_objects: 2              # Ridotto da 4 a 2 per meno confusione
+    min_scale: 0.08             # Aumentato da 0.05: oggetti non troppo piccoli
+    max_scale: 0.25             # Ridotto da 0.35: oggetti non troppo grandi
+    coco_min_area: 1000         # Aumentato da 800: solo oggetti ben definiti
