@@ -47,7 +47,7 @@ model:
     # Conflitto con Outlier Exposure: OE vuole "no object" per outlier,
     # Energy loss penalizza questo comportamento → divergenza
     # Soluzione: OE puro + post-hoc energy score all'inference
-    energy_ood_enabled: False
+    energy_ood_enabled: false
     
     network:
       class_path: models.eomt.EoMT
