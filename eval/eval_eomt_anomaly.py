@@ -19,7 +19,7 @@ import torch.nn.functional as F
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'eomt'))
 from models.eomt import EoMT
-from models.vit import ViTEncoder
+from models.vit import ViT
 
 seed = 42
 random.seed(seed)
