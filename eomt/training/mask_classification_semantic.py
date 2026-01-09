@@ -46,6 +46,9 @@ class MaskClassificationSemantic(LightningModule):
         energy_ood_max_weight: float = 0.002,
         energy_warmup_epochs: int = 15,
         max_epochs: int = 50,
+        logit_norm_enabled: bool = False,
+        logit_norm_tau: float = 0.04,
+        logit_norm_eps: float = 1e-6,
     ):
         super().__init__(
             network=network,
@@ -87,6 +90,9 @@ class MaskClassificationSemantic(LightningModule):
             eim_weight=energy_ood_max_weight,  # Max weight after warmup
             energy_warmup_epochs=energy_warmup_epochs,
             max_epochs=max_epochs,
+            logit_norm_enabled=logit_norm_enabled,
+            logit_norm_tau=logit_norm_tau,
+            logit_norm_eps=logit_norm_eps,
         )
 
         self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)
