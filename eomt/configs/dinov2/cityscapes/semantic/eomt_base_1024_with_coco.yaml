@@ -24,9 +24,9 @@ model:
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
     attn_mask_annealing_end_steps: [6634, 11609, 16585]
     
-    # Learning rate scalato per batch_size 16 (da 1e-4 con bs=8)
-    # Uso sqrt(2) scaling per batch_size 2x più grande
-    lr: 1.5e-4
+    # Learning rate scalato per batch_size 12 (da 1e-4 con bs=8)
+    # Uso sqrt(1.5) ≈ 1.22 scaling per batch_size 1.5x più grande
+    lr: 1.2e-4
     
     network:
       class_path: models.eomt.EoMT
@@ -44,8 +44,9 @@ data:
     path: "/content/drive/MyDrive/Cityscapes"
     
     # A100: batch_size ottimizzato per 40GB VRAM
-    # 16 immagini 1024x1024 con OE → training 8x più veloce rispetto a batch_size=2
-    batch_size: 16
+    # 12 immagini 1024x1024 con OE → training 6x più veloce rispetto a batch_size=2
+    # (16 era troppo, causava OOM anche su A100)
+    batch_size: 12
     num_workers: 8  # A100 ha CPU più potenti
     
     # IMPORTANTE: 1024x1024 per compatibilità con i pesi pre-addestrati
