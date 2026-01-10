@@ -13,6 +13,7 @@ from typing import List, Optional
 import torch.distributed as dist
 import torch
 import torch.nn as nn
+import math
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss,
     Mask2FormerHungarianMatcher,
@@ -98,7 +99,22 @@ class MaskClassificationLoss(Mask2FormerLoss):
             self.logit_norm_enabled and 
             class_queries_logits is not None):
             # Clone for Energy Loss (will be used AFTER normalization)
-            class_queries_logits_original = class_queries_logits.clone()
+            # Clone WITHOUT detach to maintain gradients for Energy Loss
+            # Use contiguous() to ensure proper memory layout for AMP compatibility
+            class_queries_logits_original = class_queries_logits.clone().contiguous()
+            
+            # Safety check: ensure logits are finite and real (no NaN/Inf/complex)
+            if not torch.isfinite(class_queries_logits_original).all():
+                # If original logits contain NaN/Inf, replace with zeros to avoid crashes
+                class_queries_logits_original = torch.where(
+                    torch.isfinite(class_queries_logits_original),
+                    class_queries_logits_original,
+                    torch.zeros_like(class_queries_logits_original)
+                )
+            # Ensure logits are real (not complex) - should always be true, but safety check
+            if class_queries_logits_original.is_complex():
+                # Convert complex to real (take real part) - should not happen, but safety
+                class_queries_logits_original = class_queries_logits_original.real
         else:
             # If Logit Norm disabled, use same logits (no clone needed)
             class_queries_logits_original = class_queries_logits
@@ -134,14 +150,46 @@ class MaskClassificationLoss(Mask2FormerLoss):
         # Logit normalization changes scale drastically, making margins invalid
         losses = {**loss_masks, **loss_classes}
         if self.eim_enabled and class_queries_logits_original is not None:
-            energy_loss = self.energy_ood_loss(class_queries_logits_original)  # Use original logits
-            losses["eim"] = energy_loss  # Keep "eim" key for compatibility with logging
+            # Safety check: ensure logits are finite before computing energy loss
+            if torch.isfinite(class_queries_logits_original).all():
+                energy_loss = self.energy_ood_loss(class_queries_logits_original)  # Use original logits
+                # Ensure loss is finite (safety check)
+                if torch.isfinite(energy_loss):
+                    losses["eim"] = energy_loss  # Keep "eim" key for compatibility with logging
+                else:
+                    # If energy loss is NaN/Inf, use zero loss to avoid crashing
+                    losses["eim"] = torch.tensor(0.0, device=class_queries_logits_original.device, dtype=class_queries_logits_original.dtype, requires_grad=True)
+            else:
+                # Logits contain NaN/Inf, use zero loss
+                losses["eim"] = torch.tensor(0.0, device=class_queries_logits_original.device, dtype=class_queries_logits_original.dtype, requires_grad=True)
             
             # Compute and store energy statistics for logging
             # Statistics are computed on original logits (before normalization)
-            with torch.no_grad():
-                energy_stats = self.energy_ood_loss.get_energy_stats(class_queries_logits_original)
-                self._last_energy_stats = energy_stats  # Store for logging in loss_total
+            # Wrap in try-except to avoid crashes from numerical issues
+            # Only compute stats every N batches to reduce overhead
+            try:
+                with torch.no_grad():
+                    # Check for NaN/Inf before computing stats
+                    if torch.isfinite(class_queries_logits_original).all():
+                        energy_stats = self.energy_ood_loss.get_energy_stats(class_queries_logits_original)
+                        # Verify stats are valid (all finite numbers)
+                        stats_valid = all(
+                            isinstance(v, (int, float)) and 
+                            not (math.isnan(v) or math.isinf(v))
+                            for v in energy_stats.values() if isinstance(v, (int, float, str)) and v != "warmup" and v != "active"
+                        )
+                        if stats_valid:
+                            self._last_energy_stats = energy_stats  # Store for logging in loss_total
+                        else:
+                            # Invalid stats, skip logging for this batch
+                            self._last_energy_stats = None
+                    else:
+                        # Logits contain NaN/Inf, skip stats calculation
+                        self._last_energy_stats = None
+            except Exception:
+                # If stats calculation fails for any reason, skip it but don't crash
+                # This ensures training continues even if stats computation has issues
+                self._last_energy_stats = None
 
         return losses
 

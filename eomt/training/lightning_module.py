@@ -175,7 +175,22 @@ class LightningModule(lightning.LightningModule):
             losses = {f"{key}{block_postfix}": value for key, value in losses.items()}
             losses_all_blocks |= losses
 
-        return self.criterion.loss_total(losses_all_blocks, self.log)
+        total_loss = self.criterion.loss_total(losses_all_blocks, self.log)
+        
+        # Safety check: ensure total loss is finite before backprop
+        # This prevents ComplexFloat errors in optimizer step
+        if not torch.isfinite(total_loss):
+            # If loss is NaN/Inf, return a small finite loss to avoid crash
+            # This allows training to continue but skip this problematic batch
+            total_loss = torch.tensor(1e-6, device=total_loss.device, dtype=total_loss.dtype, requires_grad=True)
+            logging.warning(f"⚠️ Non-finite loss detected at batch {batch_idx}, using safe fallback loss")
+        
+        # Ensure loss is not complex (should never happen, but safety check)
+        if total_loss.is_complex():
+            total_loss = total_loss.real
+            logging.warning(f"⚠️ Complex loss detected at batch {batch_idx}, using real part")
+        
+        return total_loss
 
     def validation_step(self, batch, batch_idx=0):
         return self.eval_step(batch, batch_idx, "val")

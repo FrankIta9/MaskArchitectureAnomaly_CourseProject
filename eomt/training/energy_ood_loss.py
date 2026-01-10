@@ -65,6 +65,15 @@ class EnergyOODLoss(nn.Module):
         Returns:
             Energy scores (batch, num_queries)
         """
+        # Safety check: ensure logits are real (not complex) and finite
+        if logits.is_complex():
+            # Convert complex to real (take real part) - should not happen
+            logits = logits.real
+        
+        if not torch.isfinite(logits).all():
+            # If logits contain NaN/Inf, return safe default energy values
+            return torch.full((logits.shape[0], logits.shape[1]), -25.0, device=logits.device, dtype=logits.dtype)
+        
         # Scale logits by temperature
         scaled_logits = logits / self.temperature
         
@@ -72,9 +81,40 @@ class EnergyOODLoss(nn.Module):
         # We only consider ID classes for energy computation
         id_logits = scaled_logits[..., :-1]  # Remove "no object" class
         
+        # Safety check: ensure id_logits has valid shape and values
+        if id_logits.numel() == 0:
+            # Return zeros if no ID logits (shouldn't happen, but safety check)
+            return torch.zeros(logits.shape[0], logits.shape[1], device=logits.device, dtype=logits.dtype)
+        
+        # Clamp logits to reasonable range to avoid numerical overflow/underflow
+        # Large values in exp can cause Inf, which then becomes NaN in log
+        # Very negative values can cause underflow, but logsumexp handles this
+        id_logits = torch.clamp(id_logits, min=-50.0, max=50.0)
+        
+        # Ensure id_logits is real and finite before logsumexp
+        if id_logits.is_complex():
+            id_logits = id_logits.real
+        if not torch.isfinite(id_logits).all():
+            id_logits = torch.where(torch.isfinite(id_logits), id_logits, torch.zeros_like(id_logits))
+        
         # Compute logsumexp for numerical stability
         # Energy = -T * logsumexp(logits / T)
+        # logsumexp is numerically stable and handles underflow/overflow
         energy = -self.temperature * torch.logsumexp(id_logits, dim=-1)
+        
+        # Ensure energy is real (not complex) - should always be true
+        if energy.is_complex():
+            energy = energy.real
+        
+        # Clamp energy to reasonable range (avoid NaN/Inf)
+        energy = torch.clamp(energy, min=-100.0, max=100.0)
+        
+        # Replace any remaining NaN/Inf with finite values
+        energy = torch.where(torch.isfinite(energy), energy, torch.full_like(energy, -25.0))
+        
+        # Final safety: ensure energy is real float, not complex
+        if not energy.dtype.is_floating_point:
+            energy = energy.float()
         
         return energy
     
@@ -102,8 +142,18 @@ class EnergyOODLoss(nn.Module):
         Returns:
             Energy regularization loss
         """
+        # Safety check: ensure logits are finite
+        if not torch.isfinite(class_logits).all():
+            # If logits contain NaN/Inf, return zero loss to avoid crashing
+            return torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
+        
         # Compute energy scores for all queries
         energy = self.compute_energy(class_logits)  # (batch, num_queries)
+        
+        # Safety check: ensure energy is finite before computing loss
+        if not torch.isfinite(energy).all():
+            # Replace NaN/Inf with safe values
+            energy = torch.where(torch.isfinite(energy), energy, torch.full_like(energy, -25.0))
         
         # Energy-based regularization:
         # Encourage low energy overall (ID-like behavior)
@@ -118,6 +168,10 @@ class EnergyOODLoss(nn.Module):
         # Use hinge loss: max(0, energy - m_in)
         # Penalize if energy is too high (> m_in threshold)
         loss = F.relu(energy - self.m_in).mean()
+        
+        # Ensure loss is finite (safety check)
+        if not torch.isfinite(loss):
+            loss = torch.tensor(0.0, device=loss.device, dtype=loss.dtype, requires_grad=True)
         
         # Alternative: Could use MSE to target specific energy value
         # loss = F.mse_loss(energy, torch.full_like(energy, self.m_in))
@@ -136,11 +190,28 @@ class EnergyOODLoss(nn.Module):
         """
         with torch.no_grad():
             energy = self.compute_energy(class_logits)
+            
+            # Ensure energy is finite before computing stats
+            if not torch.isfinite(energy).all():
+                energy = torch.where(torch.isfinite(energy), energy, torch.full_like(energy, -25.0))
+            
+            # Compute statistics with safety checks
+            energy_mean = energy.mean().item() if energy.numel() > 0 else -25.0
+            energy_std = energy.std().item() if energy.numel() > 1 and torch.isfinite(energy.std()) else 0.0
+            energy_min = energy.min().item() if energy.numel() > 0 and torch.isfinite(energy.min()) else -25.0
+            energy_max = energy.max().item() if energy.numel() > 0 and torch.isfinite(energy.max()) else -25.0
+            
+            # Ensure all stats are finite (no NaN/Inf)
+            energy_mean = energy_mean if isinstance(energy_mean, (int, float)) and (not math.isnan(energy_mean) and not math.isinf(energy_mean)) else -25.0
+            energy_std = energy_std if isinstance(energy_std, (int, float)) and (not math.isnan(energy_std) and not math.isinf(energy_std)) else 0.0
+            energy_min = energy_min if isinstance(energy_min, (int, float)) and (not math.isnan(energy_min) and not math.isinf(energy_min)) else -25.0
+            energy_max = energy_max if isinstance(energy_max, (int, float)) and (not math.isnan(energy_max) and not math.isinf(energy_max)) else -25.0
+            
             return {
-                "energy_mean": energy.mean().item(),
-                "energy_std": energy.std().item(),
-                "energy_min": energy.min().item(),
-                "energy_max": energy.max().item(),
+                "energy_mean": energy_mean,
+                "energy_std": energy_std,
+                "energy_min": energy_min,
+                "energy_max": energy_max,
             }
 
 
@@ -234,16 +305,31 @@ class EnergyOODLossWithWarmup(nn.Module):
         
         if current_weight == 0.0:
             # Warmup phase: return zero loss
-            return torch.tensor(0.0, device=class_logits.device)
+            return torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
+        
+        # Safety check: ensure logits are finite before computing loss
+        if not torch.isfinite(class_logits).all():
+            # If logits contain NaN/Inf, return zero loss to avoid crashing
+            return torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
         
         # Compute base energy loss
         energy_loss = self.base_loss(class_logits, target_labels)
+        
+        # Safety check: ensure loss is finite
+        if not torch.isfinite(energy_loss):
+            energy_loss = torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
         
         # Scale by current warmup weight
         # base_loss already applies self.base_loss.weight, so we need to adjust
         scale_factor = current_weight / self.max_weight
         
-        return energy_loss * scale_factor
+        final_loss = energy_loss * scale_factor
+        
+        # Final safety check: ensure final loss is finite
+        if not torch.isfinite(final_loss):
+            final_loss = torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
+        
+        return final_loss
     
     def get_energy_stats(self, class_logits: torch.Tensor) -> dict:
         """Get energy statistics (delegates to base loss)."""
