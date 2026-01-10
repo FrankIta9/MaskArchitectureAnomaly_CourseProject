@@ -118,22 +118,23 @@ class LightningModule(lightning.LightningModule):
                                         nn.init.zeros_(self.network.class_head.bias)
                                     logging.info("✅ Re-initialized class_head with Xavier uniform (gain=0.1) for stability")
                         else:
-                            logging.info(f"✅ class_head weights loaded successfully into model")
-                        else:
-                            logging.info(f"✅ class_head weights loaded successfully (no missing keys)")
-                            # Verify loaded weights are finite (safety check)
-                            with torch.no_grad():
-                                if hasattr(self.network, 'class_head'):
-                                    if not torch.isfinite(self.network.class_head.weight).all():
-                                        num_invalid = (~torch.isfinite(self.network.class_head.weight)).sum().item()
-                                        logging.warning(f"⚠️ class_head.weight contains {num_invalid} non-finite values after loading!")
-                                        # Clean non-finite values
-                                        self.network.class_head.weight.data = torch.where(
-                                            torch.isfinite(self.network.class_head.weight),
-                                            self.network.class_head.weight,
-                                            torch.zeros_like(self.network.class_head.weight)
-                                        )
-                                        logging.info("✅ Cleaned non-finite values from class_head.weight")
+                            logging.info(f"✅ class_head weights loaded successfully into model (other keys missing, but class_head OK)")
+                    else:
+                        # No missing keys - all weights loaded successfully
+                        logging.info(f"✅ class_head weights loaded successfully (no missing keys)")
+                        # Verify loaded weights are finite (safety check)
+                        with torch.no_grad():
+                            if hasattr(self.network, 'class_head'):
+                                if not torch.isfinite(self.network.class_head.weight).all():
+                                    num_invalid = (~torch.isfinite(self.network.class_head.weight)).sum().item()
+                                    logging.warning(f"⚠️ class_head.weight contains {num_invalid} non-finite values after loading!")
+                                    # Clean non-finite values
+                                    self.network.class_head.weight.data = torch.where(
+                                        torch.isfinite(self.network.class_head.weight),
+                                        self.network.class_head.weight,
+                                        torch.zeros_like(self.network.class_head.weight)
+                                    )
+                                    logging.info("✅ Cleaned non-finite values from class_head.weight")
                 else:
                     logging.warning("⚠️ class_head weights NOT found in checkpoint - using random initialization!")
                     logging.warning(f"   This is OK if checkpoint doesn't contain class_head, but may cause numerical issues.")
