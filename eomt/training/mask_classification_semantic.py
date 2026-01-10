@@ -7,6 +7,7 @@
 from typing import List, Optional
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
 
 from training.mask_classification_loss import MaskClassificationLoss
 from training.lightning_module import LightningModule
@@ -98,8 +99,34 @@ class MaskClassificationSemantic(LightningModule):
         self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)
     
     def on_train_epoch_start(self):
-        """Update energy loss warmup scheduler with current epoch."""
+        """Update energy loss warmup scheduler with current epoch and log status."""
         self.criterion.set_epoch(self.current_epoch)
+        
+        # Log Energy Loss status at the start of each epoch
+        if self.criterion.eim_enabled:
+            current_weight = self.criterion.energy_ood_loss.get_current_weight()
+            is_warmup = self.current_epoch < self.criterion.energy_ood_loss.warmup_epochs
+            
+            if is_warmup:
+                status_msg = (
+                    f"🔵 Epoch {self.current_epoch}: Energy Loss DISABLED (warmup phase) "
+                    f"[{self.current_epoch}/{self.criterion.energy_ood_loss.warmup_epochs}]"
+                )
+            else:
+                progress = ((self.current_epoch - self.criterion.energy_ood_loss.warmup_epochs) / 
+                           (self.criterion.energy_ood_loss.max_epochs - self.criterion.energy_ood_loss.warmup_epochs)) * 100
+                status_msg = (
+                    f"🟢 Epoch {self.current_epoch}: Energy Loss ACTIVE "
+                    f"[weight: {current_weight:.6f}/{self.criterion.energy_ood_loss.max_weight:.6f}, "
+                    f"progress: {progress:.1f}%]"
+                )
+            
+            # Log to console (rank_zero_info for distributed training)
+            logging.info(status_msg)
+            
+            # Also log as metric for wandb/other loggers
+            self.log("energy/epoch_weight", current_weight, sync_dist=False)
+            self.log("energy/warmup_active", float(is_warmup), sync_dist=False)
 
     def eval_step(
         self,

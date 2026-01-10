@@ -75,6 +75,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
                 max_epochs=max_epochs,
                 warmup_schedule="cosine",
             )
+        self._last_energy_stats = None  # Store energy stats for logging
 
     def set_epoch(self, epoch: int):
         """Update current epoch for energy warmup scheduling."""
@@ -135,6 +136,12 @@ class MaskClassificationLoss(Mask2FormerLoss):
         if self.eim_enabled and class_queries_logits_original is not None:
             energy_loss = self.energy_ood_loss(class_queries_logits_original)  # Use original logits
             losses["eim"] = energy_loss  # Keep "eim" key for compatibility with logging
+            
+            # Compute and store energy statistics for logging
+            # Statistics are computed on original logits (before normalization)
+            with torch.no_grad():
+                energy_stats = self.energy_ood_loss.get_energy_stats(class_queries_logits_original)
+                self._last_energy_stats = energy_stats  # Store for logging in loss_total
 
         return losses
 
@@ -180,6 +187,26 @@ class MaskClassificationLoss(Mask2FormerLoss):
                 loss_total = weighted_loss
             else:
                 loss_total = torch.add(loss_total, weighted_loss)
+        
+        # Log Energy Loss statistics for monitoring
+        if self.eim_enabled and self._last_energy_stats is not None:
+            stats = self._last_energy_stats
+            log_fn("energy/weight_current", stats["energy_weight_current"], sync_dist=True)
+            log_fn("energy/weight_max", stats["energy_weight_max"], sync_dist=True)
+            log_fn("energy/mean", stats["energy_mean"], sync_dist=True)
+            log_fn("energy/std", stats["energy_std"], sync_dist=True)
+            log_fn("energy/min", stats["energy_min"], sync_dist=True)
+            log_fn("energy/max", stats["energy_max"], sync_dist=True)
+            # Log warmup phase as a metric (0.0 = warmup, 1.0 = active)
+            warmup_phase_value = 0.0 if stats["warmup_phase"] == "warmup" else 1.0
+            log_fn("energy/warmup_phase", warmup_phase_value, sync_dist=True)
+            
+            # Debug: Check if energy values are reasonable (should be around m_in=-25.0 for ID)
+            # Log warning if energy is too high (might indicate scale issues)
+            if stats["energy_weight_current"] > 0.0:  # Only check when energy is active
+                if stats["energy_mean"] > -10.0:  # Energy too high (should be around -25.0 for ID)
+                    # This would indicate potential scale issues, but we log it for monitoring
+                    pass  # Just log the values, don't raise error
 
         log_fn("losses/train_loss_total", loss_total, sync_dist=True, prog_bar=True)
 
