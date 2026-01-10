@@ -1,18 +1,29 @@
 # ============================================================================
 # FROZEN BACKBONE + DECODER FINE-TUNING per Outlier Exposure
+# OTTIMIZZATO per anomalie piccole (LostFound/fs_static) + Perspective-Aware Placement (ClimaOoD)
 # ============================================================================
 #
 # STRATEGIA:
 # - Backbone (ViT) CONGELATO → preserva feature semantiche Cityscapes
 # - Solo decoder trainable (~10M params vs 95M) → fine-tuning leggero
-# - LR più alto (5e-5) possibile perché solo decoder cambia
+# - LR moderato (3e-6) per stabilità con anomalie piccole
 # - Training 10x più veloce, più stabile, zero rischio overfitting
+#
+# OTTIMIZZAZIONI APPLICATE (dopo risultati epoch 4):
+# 1. ✅ Learning Rate ridotto: 5e-6 → 3e-6 (maggiore stabilità)
+# 2. ✅ Paste probability aumentato: 0.15 → 0.20 (più esposizione outlier)
+# 3. ✅ Distribuzione pesata prioritizzata: 50% piccoli, 30% medi, 20% grandi (prima: 35/35/30)
+# 4. ✅ Range piccoli esteso: 0.02-0.05 → 0.01-0.05 (cattura oggetti piccolissimi 1-5%)
+# 5. ✅ Perspective-Aware Placement (ClimaOoD): oggetti in basso = più grandi (realismo fisico)
+# 6. ✅ Drivable Region Constraints (ClimaOoD): oggetti solo su road/sidewalk (coerenza spaziale)
 #
 # VANTAGGI:
 # 1. Mantiene 100% mIoU Cityscapes (backbone intatto)
 # 2. Decoder impara solo a riconoscere outliers COCO come "no object"
-# 3. Convergenza rapida (poche epochs sufficienti)
-# 4. Allineato con best practices OE (RbA paper)
+# 3. Priorità a anomalie piccole (LostFound/fs_static) → 50% oggetti piccoli
+# 4. Preserva RoadObstacle21 (anomalie grandi) → 20% oggetti grandi
+# 5. Perspective-Aware + Drivable Regions migliorano realismo (ispirato da ClimaOoD)
+# 6. Allineato con best practices OE (RbA paper) + ClimaOoD (perspective-aware placement)
 #
 # PARAMETRI TRAINABILI:
 # - Scale blocks (cross-attention tra ViT e queries)
@@ -46,7 +57,7 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "OE_FrozenBackbone_lr5e6_LogitNorm_weightedScale"
+      name: "OE_FrozenBackbone_lr3e6_LogitNorm_weightedScale50_PerspectiveAware_ClimaOoD"
 
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
@@ -60,16 +71,17 @@ model:
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
     attn_mask_annealing_end_steps: [6634, 11609, 16585]
     
-    # ===== LR BILANCIATO PER FROZEN BACKBONE + BATCH SIZE RIDOTTO =====
-    # 5e-6 = compromesso tra 1e-6 (ultra-conservativo) e 1e-5 (più veloce ma instabile)
+    # ===== LR OTTIMIZZATO PER STABILITÀ E CONVERGENZA =====
+    # 3e-6 = bilanciato per stabilità (ridotto da 5e-6 dopo risultati epoch 4)
     # MOTIVAZIONE:
-    # - Frozen backbone → decoder può tollerare LR più alto (best practices: 1e-4 per decoder)
-    # - Batch size ridotto (2 vs 6 config funzionante) → LR più alto compensa effective batch size minore
-    # - Energy Loss + Logit Norm → 5e-6 è più stabile di 1e-4 ma più veloce di 1e-6
+    # - Frozen backbone → decoder può tollerare LR moderato (best practices: 1e-4 per decoder)
+    # - Batch size ridotto (2 vs 6 config funzionante) → LR più basso compensa instabilità
+    # - Energy Loss + Logit Norm + Perspective-Aware → 3e-6 è più stabile di 5e-6
     # - Energy warmup (epochs 0-9 disabled) → mitigazione instabilità iniziale
+    # - Risultati epoch 4: LostFound 18.58% AUPRC → serve più stabilità per anomalie piccole
     # VALIDATO: config funzionante (RoadObstacle21 92%) aveva lr: 1e-6 con batch_size=6
-    # Con batch_size=2, 5e-6 è appropriato per compensare effective batch size minore
-    lr: 5e-6
+    # Con batch_size=2 e anomalie piccole, 3e-6 è più appropriato per convergenza stabile
+    lr: 3e-6
     llrd: 0.8  # Ignorato (backbone frozen), ma lasciato per compatibility
     
     # ===== ENERGY OOD CON WARMUP =====
@@ -139,30 +151,38 @@ data:
     # - fs_static/LostFound: anomalie PICCOLISSIME (1-5%) → basso AUPRC
     # - RoadAnomaly: anomalie MISTE (5-40%) → migliorato (+1.84%)
     #
-    # CAUSE PROBABILI DEL DISIMPARAMENTO:
-    # 1. paste_probability: 0.20 (era 0.15) → TROPPO ALTO, confonde il modello ✅ CORRETTO: 0.15
-    # 2. min_scale/max_scale: 0.03/0.08 (erano 0.08/0.15) → TROPPO PICCOLI per RoadObstacle21
-    # 3. coco_min_area: 600 (era 1500!) → TROPPO BASSO, oggetti di bassa qualità ❌ CORRETTO: 1500
-    # 4. train2017 SENZA distribuzione pesata → troppa varietà casuale senza controllo
+    # CAUSE PROBABILI DEL DISIMPARAMENTO (storico, prima delle ottimizzazioni):
+    # 1. min_scale/max_scale troppo piccoli (0.03/0.08) → TROPPO PICCOLI per RoadObstacle21
+    # 2. coco_min_area troppo basso (600 vs 1500) → TROPPO BASSO, oggetti di bassa qualità ✅ CORRETTO: 1500
+    # 3. train2017 SENZA distribuzione pesata → troppa varietà casuale senza controllo
     #
-    # SOLUZIONE: Parametri VALIDATI + Distribuzione pesata BILANCIATA
-    # - paste_probability: 0.15 (valore originale funzionante) ✅
+    # SOLUZIONE: Parametri OTTIMIZZATI per anomalie piccole + Distribuzione pesata PRIORITIZZATA
+    # - paste_probability: 0.20 (aumentato da 0.15) per più esposizione outlier ✅ OTTIMIZZATO
+    #   MOTIVAZIONE: Risultati epoch 4 mostrano LostFound 18.58% AUPRC → serve più esposizione
+    #   Aumento a 0.20 per ~33% più outlier per batch (da 15% a 20% batch con OE)
     # - coco_min_area: 1500 (valore originale funzionante) ✅ CRITICO!
-    # - Distribuzione pesata (35% piccoli, 35% medi, 30% grandi) CONTROLLA la varietà train2017
-    # - Scale ranges ESTESI per matchare RoadObstacle21 (anomalie fino al 40%!): grandi fino a 0.25-0.30
-    paste_probability: 0.15  # VALIDATO: stesso del config funzionante (RoadObstacle21 92%)
+    # - Distribuzione pesata (50% piccoli, 30% medi, 20% grandi) PRIORITIZZA anomalie piccole ✅ OTTIMIZZATO
+    #   MOTIVAZIONE: LostFound/fs_static hanno anomalie 1-5% → serve 50% oggetti piccoli
+    # - Scale ranges OTTIMIZZATI per catturare oggetti piccolissimi (0.01-0.05) ✅ OTTIMIZZATO
+    paste_probability: 0.20  # OTTIMIZZATO: aumentato da 0.15 per più esposizione (LostFound 18.58% → target miglioramento)
     min_objects: 1
     max_objects: 1           # VALIDATO: stesso del config funzionante (più stabile)
     
-    # Distribuzione pesata multi-scale BILANCIATA (35% piccoli, 35% medi, 30% grandi)
-    # Priorità a preservare RoadObstacle21 (30% grandi fino a 0.30) mentre miglioriamo fs_static/LostFound (35% piccoli)
-    # IMPORTANTE: RoadObstacle21 ha anomalie fino al 40% → range grandi esteso a 0.10-0.30 (non solo 0.18!)
-    use_weighted_scale: true  # Abilita distribuzione pesata bilanciata
+    # Distribuzione pesata multi-scale PRIORITIZZATA per anomalie piccole (50% piccoli, 30% medi, 20% grandi)
+    # OTTIMIZZATA dopo risultati epoch 4: LostFound 18.58% AUPRC, fs_static 54.46% AUPRC → anomalie piccolissime (1-5%)
+    # PRIORITÀ: 50% oggetti piccoli per matchare LostFound/fs_static, preservando RoadObstacle21 (20% grandi)
+    # IMPORTANTE: Range piccoli ESTESO a 0.01-0.05 per catturare oggetti piccolissimi (1% immagine)
+    # RoadObstacle21 ha anomalie fino al 40% → range grandi 0.10-0.30 preserva performance (20% prob)
+    use_weighted_scale: true  # Abilita distribuzione pesata prioritizzata per anomalie piccole
     scale_ranges:
-      - [0.02, 0.05]   # Piccoli: 2-5% immagine (35% prob) → matcha fs_static/LostFound anomalie piccolissime
-      - [0.05, 0.10]   # Medi: 5-10% immagine (35% prob) → matcha RoadAnomaly piccole/medie
-      - [0.10, 0.30]   # Grandi: 10-30% immagine (30% prob) → PRESERVA RoadObstacle21 (anomalie grandi fino a 40%!)
-    scale_weights: [0.35, 0.35, 0.30]  # 35% piccoli, 35% medi, 30% grandi (BILANCIATO verso grandi)
+      - [0.01, 0.05]   # Piccoli: 1-5% immagine (50% prob) ✅ OTTIMIZZATO: range esteso 0.01-0.05 per oggetti piccolissimi
+        # MOTIVAZIONE: LostFound/fs_static hanno anomalie 1-5% → range 0.01-0.05 matcha meglio
+        # Prima era 0.02-0.05 → ora 0.01-0.05 per catturare oggetti ancora più piccoli (1% vs 2%)
+      - [0.05, 0.10]   # Medi: 5-10% immagine (30% prob) → matcha RoadAnomaly piccole/medie
+      - [0.10, 0.30]   # Grandi: 10-30% immagine (20% prob) → PRESERVA RoadObstacle21 (anomalie grandi fino a 40%!)
+        # Ridotto peso da 30% a 20% per priorizzare anomalie piccole, ma mantiene range per RoadObstacle21
+    scale_weights: [0.50, 0.30, 0.20]  # ✅ OTTIMIZZATO: 50% piccoli (↑ da 35%), 30% medi (↓ da 35%), 20% grandi (↓ da 30%)
+    # MOTIVAZIONE: Risultati epoch 4 mostrano LostFound 18.58% AUPRC → serve 50% oggetti piccoli per convergenza
     
     # Parametri legacy (ignorati se use_weighted_scale=true):
     min_scale: 0.08          # Ignorato se use_weighted_scale=true (valore originale funzionante)
@@ -171,3 +191,18 @@ data:
     # IMPORTANTE: coco_min_area=1500 è ESSENZIALE! Il config funzionante aveva 1500, non 800!
     # COCO standard: Small <1024px, Medium 1024-9216px, Large >9216px
     # 1500px è nella categoria "Medium" (ben definiti, non rumore) ✅
+    
+    # ===== PERSPECTIVE-AWARE PLACEMENT (Ispirato da ClimaOoD) =====
+    # Migliora il realismo fisico degli oggetti incollati
+    # - Oggetti in basso (vicino alla camera) = più grandi
+    # - Oggetti in alto (lontani) = più piccoli
+    # Migliora il realismo rispetto a scale random, come nel paper ClimaOoD
+    use_perspective_aware: true  # Abilita perspective-aware scaling (default: true)
+    perspective_strength: 1.0    # Forza dell'effetto prospettiva (0.0 = disabilitato, 1.0 = massimo) (default: 1.0)
+    
+    # ===== DRIVABLE REGION CONSTRAINTS (Ispirato da ClimaOoD) =====
+    # Posiziona oggetti solo su regioni "drivable" (road + sidewalk)
+    # Evita di posizionare oggetti su cielo, edifici, vegetazione
+    # Migliora la coerenza spaziale rispetto a posizione random, come nel paper ClimaOoD
+    use_drivable_regions: true   # Abilita vincolo drivable regions (default: true)
+    drivable_class_ids: [0, 1]   # Cityscapes train_id: 0=road, 1=sidewalk (default: [0, 1])

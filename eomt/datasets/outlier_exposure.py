@@ -46,6 +46,12 @@ class OutlierExposureTransform(nn.Module):
         use_weighted_scale: bool = False,
         scale_ranges: Optional[list] = None,  # [(min1, max1), (min2, max2), ...]
         scale_weights: Optional[list] = None,  # [weight1, weight2, ...] (sum should be 1.0)
+        # Perspective-aware placement (inspired by ClimaOoD)
+        use_perspective_aware: bool = True,
+        perspective_strength: float = 1.0,  # 0.0 = disabled, 1.0 = full effect
+        # Drivable region constraints (inspired by ClimaOoD)
+        use_drivable_regions: bool = True,
+        drivable_class_ids: Optional[list] = None,  # [0, 1] for road, sidewalk in Cityscapes
     ):
         """
         Args:
@@ -60,6 +66,10 @@ class OutlierExposureTransform(nn.Module):
             scale_ranges: List of (min, max) scale ranges for each category (default: None)
             scale_weights: List of weights for each scale range (should sum to 1.0, default: None)
                           Example: scale_weights=[0.6, 0.3, 0.1] means 60% small, 30% medium, 10% large
+            use_perspective_aware: If True, apply perspective-aware scaling (objects in lower Y = larger) (default: True)
+            perspective_strength: Strength of perspective effect (0.0 = disabled, 1.0 = full effect) (default: 1.0)
+            use_drivable_regions: If True, only place objects on drivable regions (road/sidewalk) (default: True)
+            drivable_class_ids: List of train_id class IDs for drivable regions (default: [0, 1] for Cityscapes)
         """
         super().__init__()
         self.outlier_dataset = outlier_dataset
@@ -84,6 +94,14 @@ class OutlierExposureTransform(nn.Module):
         else:
             self.scale_ranges = None
             self.scale_weights = None
+        
+        # Perspective-aware placement (inspired by ClimaOoD)
+        self.use_perspective_aware = use_perspective_aware
+        self.perspective_strength = perspective_strength
+        
+        # Drivable region constraints (inspired by ClimaOoD)
+        self.use_drivable_regions = use_drivable_regions
+        self.drivable_class_ids = drivable_class_ids if drivable_class_ids is not None else [0, 1]  # Road=0, Sidewalk=1 in Cityscapes
         
     def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -172,11 +190,11 @@ class OutlierExposureTransform(nn.Module):
         target: Dict[str, Any],
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
-        Apply outlier exposure transformation.
+        Apply outlier exposure transformation with perspective-aware placement and drivable region constraints.
         
         Args:
             img: Input image tensor
-            target: Target dictionary
+            target: Target dictionary with masks and labels
             
         Returns:
             Transformed image and target
@@ -187,19 +205,63 @@ class OutlierExposureTransform(nn.Module):
         num_objects = random.randint(self.min_objects, self.max_objects)
         h, w = img.shape[-2:]
         
+        # Get drivable mask once for all objects
+        drivable_mask = self._get_drivable_mask(target, h, w)
+        
         for _ in range(num_objects):
             # Get random outlier object
             obj_img, obj_mask = self._get_random_outlier_object()
+            obj_h_orig, obj_w_orig = obj_img.shape[-2:]
             
-            # Random position
-            x = random.randint(0, w - 1)
-            y = random.randint(0, h - 1)
-            
-            # Select scale using weighted distribution if enabled, otherwise uniform
+            # Select base scale using weighted distribution if enabled, otherwise uniform
             if self.use_weighted_scale:
-                scale = self._sample_weighted_scale()
+                base_scale = self._sample_weighted_scale()
             else:
-                scale = random.uniform(self.min_scale, self.max_scale)
+                base_scale = random.uniform(self.min_scale, self.max_scale)
+            
+            # First, sample an approximate Y position for perspective-aware scaling
+            # If drivable regions are enabled, prefer lower Y (closer to camera, more drivable)
+            if drivable_mask is not None and drivable_mask.any():
+                # Sample Y from lower half more often (closer to camera)
+                # 70% chance to sample from lower half, 30% from upper half
+                if random.random() < 0.7:
+                    y_approx = random.randint(h // 2, h - 1)  # Lower half
+                else:
+                    y_approx = random.randint(0, h // 2)  # Upper half
+            else:
+                y_approx = random.randint(0, h - 1)
+            
+            # Apply perspective-aware scaling based on approximate Y position
+            scale = self._apply_perspective_aware_scale(base_scale, y_approx, h)
+            
+            # Clamp scale to valid range
+            scale = max(self.min_scale, min(self.max_scale * 1.5, scale))  # Allow slightly larger for perspective
+            
+            # Calculate final object dimensions after scaling
+            obj_h_scaled = max(1, int(obj_h_orig * scale))
+            obj_w_scaled = max(1, int(obj_w_orig * scale))
+            obj_h_scaled = min(obj_h_scaled, h)
+            obj_w_scaled = min(obj_w_scaled, w)
+            
+            # Sample position (with drivable region constraint if enabled)
+            position = None
+            if drivable_mask is not None:
+                # Try to sample from drivable regions using scaled dimensions
+                position = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
+            
+            # Fallback to random position if drivable sampling failed
+            if position is None:
+                x = random.randint(0, max(0, w - obj_w_scaled))
+                y = random.randint(0, max(0, h - obj_h_scaled))
+                
+                # Re-apply perspective-aware scaling based on final Y position
+                scale = self._apply_perspective_aware_scale(base_scale, y, h)
+                scale = max(self.min_scale, min(self.max_scale * 1.5, scale))
+            else:
+                x, y = position
+                # Re-apply perspective-aware scaling based on final Y position
+                scale = self._apply_perspective_aware_scale(base_scale, y, h)
+                scale = max(self.min_scale, min(self.max_scale * 1.5, scale))
             
             # Paste object
             img, target = self._paste_object(
@@ -227,6 +289,157 @@ class OutlierExposureTransform(nn.Module):
         scale = random.uniform(min_scale, max_scale)
         
         return scale
+    
+    def _apply_perspective_aware_scale(self, base_scale: float, y: int, h: int) -> float:
+        """
+        Apply perspective-aware scaling based on vertical position (inspired by ClimaOoD).
+        
+        Objects in lower Y positions (closer to camera) are scaled larger.
+        Objects in higher Y positions (farther from camera) are scaled smaller.
+        
+        Args:
+            base_scale: Base scale factor from weighted/uniform distribution
+            y: Vertical position (pixel coordinate, 0 = top, h = bottom)
+            h: Image height
+            
+        Returns:
+            Adjusted scale factor considering perspective
+        """
+        if not self.use_perspective_aware or self.perspective_strength <= 0.0:
+            return base_scale
+        
+        # Perspective factor: objects in lower Y (higher y value, closer) should be larger
+        # Formula inspired by ClimaOoD: hi = H/yi (inverse relationship)
+        # Normalize Y to [0.5, 2.0] range for reasonable scaling
+        # Y=0 (top, far) -> factor ~0.5 (smaller)
+        # Y=h (bottom, close) -> factor ~2.0 (larger)
+        normalized_y = (y + 1) / h  # +1 to avoid division by zero
+        perspective_factor = (h / (normalized_y * h + 1))  # Inverse relationship
+        
+        # Normalize to reasonable range [0.7, 1.5] for perspective effect
+        min_factor = 0.7
+        max_factor = 1.5
+        perspective_factor = min_factor + (max_factor - min_factor) * (
+            (perspective_factor - 0.5) / 1.5  # Normalize from [0.5, 2.0] to [0.7, 1.5]
+        )
+        perspective_factor = max(min_factor, min(max_factor, perspective_factor))
+        
+        # Apply perspective strength (0.0 = no effect, 1.0 = full effect)
+        adjusted_factor = 1.0 + (perspective_factor - 1.0) * self.perspective_strength
+        
+        return base_scale * adjusted_factor
+    
+    def _get_drivable_mask(self, target: Dict[str, Any], h: int, w: int) -> Optional[torch.Tensor]:
+        """
+        Extract drivable region mask from target semantic masks.
+        
+        Args:
+            target: Target dictionary with masks and labels
+            h: Image height
+            w: Image width
+            
+        Returns:
+            Binary mask of drivable regions (road + sidewalk) or None if not available
+        """
+        if not self.use_drivable_regions:
+            return None
+        
+        if "masks" not in target or "labels" not in target:
+            return None
+        
+        masks = target["masks"]  # Shape: (num_classes, H, W)
+        labels = target["labels"]  # Shape: (num_classes,)
+        
+        if masks.shape[0] == 0 or len(labels) == 0:
+            return None
+        
+        # Safety check: ensure masks and labels have same length
+        num_classes = min(masks.shape[0], len(labels))
+        
+        # Find masks for drivable classes (road=0, sidewalk=1)
+        drivable_mask = torch.zeros((h, w), dtype=torch.bool, device=masks.device)
+        
+        for i in range(num_classes):
+            label_id = labels[i]
+            if label_id.item() in self.drivable_class_ids:
+                # Combine masks: road OR sidewalk
+                mask_class = masks[i]  # Shape: (H, W) or (1, H, W) depending on how it's stored
+                
+                # Handle different mask shapes
+                if mask_class.dim() == 3:
+                    mask_class = mask_class.squeeze(0)  # Remove batch dimension if present
+                
+                if mask_class.shape == (h, w):
+                    drivable_mask = drivable_mask | mask_class.bool()
+                elif mask_class.numel() > 0:
+                    # Handle resized masks
+                    mask_resized = F.resize(
+                        mask_class.unsqueeze(0).float() if mask_class.dim() == 2 else mask_class.float(),
+                        (h, w),
+                        interpolation=F.InterpolationMode.NEAREST
+                    )
+                    if mask_resized.dim() == 3:
+                        mask_resized = mask_resized.squeeze(0)
+                    drivable_mask = drivable_mask | mask_resized.bool()
+        
+        return drivable_mask if drivable_mask.any() else None
+    
+    def _sample_drivable_position(
+        self, drivable_mask: torch.Tensor, obj_h: int, obj_w: int, h: int, w: int, max_attempts: int = 100
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Sample a random position within drivable regions that can fit the object.
+        
+        Args:
+            drivable_mask: Binary mask of drivable regions (H, W)
+            obj_h: Object height (after scaling)
+            obj_w: Object width (after scaling)
+            h: Image height
+            w: Image width
+            max_attempts: Maximum attempts to find valid position
+            
+        Returns:
+            (x, y) position tuple or None if no valid position found
+        """
+        if drivable_mask is None or not drivable_mask.any():
+            return None
+        
+        # Ensure object dimensions are valid
+        obj_h = max(1, min(obj_h, h))
+        obj_w = max(1, min(obj_w, w))
+        
+        # Get all valid positions (where drivable_mask is True)
+        valid_positions = torch.nonzero(drivable_mask, as_tuple=False)  # Shape: (N, 2) with [y, x]
+        
+        if len(valid_positions) == 0:
+            return None
+        
+        # Try to find a position where the object fits
+        for _ in range(max_attempts):
+            # Randomly select a valid position
+            idx = random.randint(0, len(valid_positions) - 1)
+            y, x = valid_positions[idx].tolist()
+            
+            # Check if object fits at this position
+            x_end = min(x + obj_w, w)
+            y_end = min(y + obj_h, h)
+            
+            # Adjust position if object would go out of bounds
+            if x_end > w:
+                x = max(0, w - obj_w)
+                x_end = w
+            if y_end > h:
+                y = max(0, h - obj_h)
+                y_end = h
+            
+            if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
+                # Check if the object region is mostly drivable (at least 40%)
+                region_mask = drivable_mask[y:y_end, x:x_end]
+                if region_mask.numel() > 0 and region_mask.sum().float() >= (region_mask.numel() * 0.4):
+                    return (x, y)
+        
+        # Fallback: return None, will use random position in forward
+        return None
 
 
 class COCOOutlierDataset:

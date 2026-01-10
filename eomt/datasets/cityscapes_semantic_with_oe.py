@@ -46,6 +46,12 @@ class CityscapesSemanticWithOE(LightningDataModule):
         use_weighted_scale: bool = False,
         scale_ranges: Optional[list] = None,  # [(min1, max1), (min2, max2), ...]
         scale_weights: Optional[list] = None,  # [weight1, weight2, ...] (should sum to 1.0)
+        # Perspective-aware placement (inspired by ClimaOoD)
+        use_perspective_aware: bool = True,
+        perspective_strength: float = 1.0,  # 0.0 = disabled, 1.0 = full effect
+        # Drivable region constraints (inspired by ClimaOoD)
+        use_drivable_regions: bool = True,
+        drivable_class_ids: Optional[list] = None,  # [0, 1] for road, sidewalk in Cityscapes
     ) -> None:
         """
         Args:
@@ -58,6 +64,13 @@ class CityscapesSemanticWithOE(LightningDataModule):
             min_scale: Minimum scale factor for pasted objects
             max_scale: Maximum scale factor for pasted objects
             coco_min_area: Minimum object area in pixels for COCO objects
+            use_weighted_scale: If True, use weighted multi-scale distribution
+            scale_ranges: List of (min, max) scale ranges for weighted distribution
+            scale_weights: List of weights for each scale range (should sum to 1.0)
+            use_perspective_aware: If True, apply perspective-aware scaling (default: True)
+            perspective_strength: Strength of perspective effect (0.0-1.0, default: 1.0)
+            use_drivable_regions: If True, only place objects on drivable regions (default: True)
+            drivable_class_ids: List of train_id class IDs for drivable regions (default: [0, 1])
         """
         super().__init__(
             path=path,
@@ -89,6 +102,10 @@ class CityscapesSemanticWithOE(LightningDataModule):
                     use_weighted_scale=use_weighted_scale,
                     scale_ranges=scale_ranges,
                     scale_weights=scale_weights,
+                    use_perspective_aware=use_perspective_aware,
+                    perspective_strength=perspective_strength,
+                    use_drivable_regions=use_drivable_regions,
+                    drivable_class_ids=drivable_class_ids,
                 )
                 print(f"Outlier Exposure enabled with {len(coco_dataset)} COCO objects")
             except Exception as e:
