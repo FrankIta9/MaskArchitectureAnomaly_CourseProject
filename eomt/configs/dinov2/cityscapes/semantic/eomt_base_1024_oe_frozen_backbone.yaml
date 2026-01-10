@@ -103,9 +103,12 @@ data:
     scale_range: [0.5, 2.0]
     check_empty_targets: true
     
-    # ===== OUTLIER EXPOSURE CONSERVATIVO =====
+    # ===== OUTLIER EXPOSURE OTTIMIZZATO =====
     coco_path: "/content/drive/MyDrive/coco2017_zips"
-    coco_split: "val2017"
+    coco_split: "train2017"  # Era val2017 → train2017 per più varietà
+    # MOTIVAZIONE: Con max_objects=1 e paste_prob=0.15, train2017 è stabile
+    # Vantaggi: ~500k oggetti validi vs ~18k (val2017) → molto più varietà
+    # Con 1 oggetto/batch al 15%, uso ~445 oggetti/epoch → train2017 evita ripetizioni
     use_coco_zip: true
     
     # Parametri OE ottimizzati per anomalie piccole (fs_static, RoadAnomaly)
