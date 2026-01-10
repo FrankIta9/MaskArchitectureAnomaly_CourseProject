@@ -1,0 +1,115 @@
+# ============================================================================
+# FROZEN BACKBONE + DECODER FINE-TUNING per Outlier Exposure
+# ============================================================================
+#
+# STRATEGIA:
+# - Backbone (ViT) CONGELATO → preserva feature semantiche Cityscapes
+# - Solo decoder trainable (~10M params vs 95M) → fine-tuning leggero
+# - LR più alto (5e-5) possibile perché solo decoder cambia
+# - Training 10x più veloce, più stabile, zero rischio overfitting
+#
+# VANTAGGI:
+# 1. Mantiene 100% mIoU Cityscapes (backbone intatto)
+# 2. Decoder impara solo a riconoscere outliers COCO come "no object"
+# 3. Convergenza rapida (poche epochs sufficienti)
+# 4. Allineato con best practices OE (RbA paper)
+#
+# PARAMETRI TRAINABILI:
+# - Scale blocks (cross-attention tra ViT e queries)
+# - Learned queries (embeddings semantici)
+# - Class head (classifica in-distribution vs "no object")
+# - Mask head (genera maschere per ogni query)
+#
+# ============================================================================
+
+trainer:
+  max_epochs: 30  # Ridotto: convergenza più rapida con solo decoder
+  
+  # Batch size più grande possibile con decoder-only training
+  accumulate_grad_batches: 1  # Effective = batch_size
+  precision: "16-mixed"
+  
+  # Checkpoint su Google Drive
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: "/content/drive/MyDrive/eomt_oe_frozen_backbone"
+        filename: "eomt_frozen-{epoch:03d}-{metrics/val_iou_all:.4f}"
+        monitor: "metrics/val_iou_all"
+        mode: "max"
+        save_top_k: 3
+        save_last: true
+        every_n_epochs: 1
+  
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      resume: allow
+      project: "eomt"
+      name: "OE_FrozenBackbone_lr5e5_paste15"
+
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    # Pesi Cityscapes puliti
+    ckpt_path: "/content/drive/MyDrive/eomt_cityscapes.bin"
+    
+    attn_mask_annealing_enabled: True
+    attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    attn_mask_annealing_end_steps: [6634, 11609, 16585]
+    
+    # ===== LR PIÙ ALTO per decoder-only =====
+    # 5e-5 = 25x più alto di 2e-6 (ultraconservativo full model)
+    # Safe perché solo decoder cambia, backbone preservato
+    lr: 5e-5
+    llrd: 0.8  # Ignorato (backbone frozen), ma lasciato per compatibility
+    
+    # ===== ENERGY OOD CON WARMUP =====
+    # Può essere più aggressivo perché backbone è stabile
+    energy_ood_enabled: true
+    energy_ood_max_weight: 0.005  # Leggermente più alto di 0.002
+    energy_warmup_epochs: 5  # Warmup più breve (era 15)
+    max_epochs: 30
+    
+    # Logit Normalization disabled di default
+    logit_norm_enabled: false
+    logit_norm_tau: 0.04
+    logit_norm_eps: 1e-6
+    
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_base_patch14_reg4_dinov2
+
+data:
+  class_path: datasets.cityscapes_semantic_with_oe.CityscapesSemanticWithOE
+  init_args:
+    path: "/content/drive/MyDrive/Cityscapes"
+    
+    # Batch size più grande (solo decoder trainable → meno VRAM)
+    batch_size: 6  # Era 4, ora possibile aumentare
+    num_workers: 8
+    
+    img_size: [1024, 1024]
+    num_classes: 19
+    color_jitter_enabled: true
+    scale_range: [0.5, 2.0]
+    check_empty_targets: true
+    
+    # ===== OUTLIER EXPOSURE CONSERVATIVO =====
+    coco_path: "/content/drive/MyDrive/coco2017_zips"
+    coco_split: "val2017"
+    use_coco_zip: true
+    
+    # Parametri OE gentili
+    paste_probability: 0.15  # 15% batch con outliers
+    min_objects: 1
+    max_objects: 1           # Solo 1 oggetto per volta
+    min_scale: 0.08
+    max_scale: 0.15
+    coco_min_area: 1500      # Solo oggetti ben definiti

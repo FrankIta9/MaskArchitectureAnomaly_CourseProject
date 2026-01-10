@@ -100,60 +100,44 @@ class LightningModule(lightning.LightningModule):
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
     def configure_optimizers(self):
-        encoder_param_names = {
-            n for n, _ in self.network.encoder.backbone.named_parameters()
-        }
-        backbone_param_groups = []
-        other_param_groups = []
-        backbone_blocks = len(self.network.encoder.backbone.blocks)
-        block_i = backbone_blocks
+        # ===================================================================
+        # FREEZE BACKBONE FOR OUTLIER EXPOSURE FINE-TUNING
+        # ===================================================================
+        # Strategy: Preserve strong Cityscapes semantic features in ViT encoder
+        # Train only decoder (scale_blocks, queries, mask/class heads) to:
+        # - Recognize COCO outliers as "no object"
+        # - Maintain high mIoU on in-distribution classes
+        # - Faster convergence, less overfitting, stable training
+        # ===================================================================
+        if hasattr(self.network, 'encoder'):
+            frozen_params = 0
+            for param in self.network.encoder.parameters():
+                param.requires_grad = False
+                frozen_params += param.numel()
+            print(f"🔒 Backbone FROZEN: {frozen_params:,} params")
+            print("✅ Training only decoder for Outlier Exposure fine-tuning")
+        
+        # Now configure optimizer only for trainable (decoder) parameters
+        decoder_param_groups = []
+        
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue  # Skip frozen backbone
+            
+            # All decoder params get base LR (no LLRD needed since backbone frozen)
+            decoder_param_groups.append(
+                {"params": [param], "lr": self.lr, "name": name}
+            )
+        
+        print(f"🎯 Trainable params: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
+        
+        optimizer = AdamW(decoder_param_groups, weight_decay=self.weight_decay)
 
-        l2_blocks = torch.arange(
-            backbone_blocks - self.network.num_blocks, backbone_blocks
-        ).tolist()
-
-        for name, param in reversed(list(self.named_parameters())):
-            lr = self.lr
-
-            if name.replace("network.encoder.backbone.", "") in encoder_param_names:
-                name_list = name.split(".")
-
-                is_block = False
-                for i, key in enumerate(name_list):
-                    if key == "blocks":
-                        block_i = int(name_list[i + 1])
-                        is_block = True
-
-                if is_block or block_i == 0:
-                    lr *= self.llrd ** (backbone_blocks - 1 - block_i)
-
-                elif (is_block or block_i == 0) and self.lr_mult != 1.0:
-                    lr *= self.lr_mult
-
-                if "backbone.norm" in name:
-                    lr = self.lr
-
-                if (
-                    is_block
-                    and (block_i in l2_blocks)
-                    and ((not self.llrd_l2_enabled) or (self.lr_mult != 1.0))
-                ):
-                    lr = self.lr
-
-                backbone_param_groups.append(
-                    {"params": [param], "lr": lr, "name": name}
-                )
-            else:
-                other_param_groups.append(
-                    {"params": [param], "lr": self.lr, "name": name}
-                )
-
-        param_groups = backbone_param_groups + other_param_groups
-        optimizer = AdamW(param_groups, weight_decay=self.weight_decay)
-
+        # Simplified scheduler: no backbone warmup needed (it's frozen)
+        # Only decoder gets warmup + poly decay
         scheduler = TwoStageWarmupPolySchedule(
             optimizer,
-            num_backbone_params=len(backbone_param_groups),
+            num_backbone_params=0,  # No backbone params since frozen
             warmup_steps=self.warmup_steps,
             total_steps=self.trainer.estimated_stepping_batches,
             poly_power=self.poly_power,
