@@ -1,0 +1,80 @@
+# ============================================================================
+# FROZEN BACKBONE + DECODER FINE-TUNING per Outlier Exposure
+# NO WANDB LOGGER (per evitare problemi API key)
+# ============================================================================
+
+trainer:
+  max_epochs: 30
+  accumulate_grad_batches: 1
+  precision: "16-mixed"
+  
+  # Checkpoint su Google Drive
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: "/content/drive/MyDrive/eomt_oe_frozen_backbone"
+        filename: "eomt_frozen-{epoch:03d}-{metrics/val_iou_all:.4f}"
+        monitor: "metrics/val_iou_all"
+        mode: "max"
+        save_top_k: 3
+        save_last: true
+        every_n_epochs: 1
+  
+  # Logger disabilitato (metriche solo in console/checkpoint)
+  logger: false
+
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    ckpt_path: "/content/drive/MyDrive/eomt_cityscapes.bin"
+    
+    attn_mask_annealing_enabled: True
+    attn_mask_annealing_start_steps: [3317, 8292, 13268]
+    attn_mask_annealing_end_steps: [6634, 11609, 16585]
+    
+    lr: 1e-6
+    llrd: 0.8
+    
+    # Energy OOD con warmup
+    energy_ood_enabled: true
+    energy_ood_max_weight: 0.002
+    energy_warmup_epochs: 10
+    max_epochs: 30
+    
+    # Logit Normalization enabled
+    logit_norm_enabled: true
+    logit_norm_tau: 0.04
+    logit_norm_eps: 1e-6
+    
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_base_patch14_reg4_dinov2
+
+data:
+  class_path: datasets.cityscapes_semantic_with_oe.CityscapesSemanticWithOE
+  init_args:
+    path: "/content/drive/MyDrive/Cityscapes"
+    batch_size: 6
+    num_workers: 8
+    img_size: [1024, 1024]
+    num_classes: 19
+    color_jitter_enabled: true
+    scale_range: [0.5, 2.0]
+    check_empty_targets: true
+    
+    # Outlier Exposure conservativo
+    coco_path: "/content/drive/MyDrive/coco2017_zips"
+    coco_split: "val2017"
+    use_coco_zip: true
+    paste_probability: 0.15
+    min_objects: 1
+    max_objects: 1
+    min_scale: 0.08
+    max_scale: 0.15
+    coco_min_area: 1500
