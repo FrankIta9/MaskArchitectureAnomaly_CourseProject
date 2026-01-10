@@ -9,21 +9,29 @@
 # - LR moderato (3e-6) per stabilità con anomalie piccole
 # - Training 10x più veloce, più stabile, zero rischio overfitting
 #
-# OTTIMIZZAZIONI APPLICATE (dopo risultati epoch 4):
-# 1. ✅ Learning Rate ridotto: 5e-6 → 3e-6 (maggiore stabilità)
-# 2. ✅ Paste probability aumentato: 0.15 → 0.20 (più esposizione outlier)
-# 3. ✅ Distribuzione pesata prioritizzata: 50% piccoli, 30% medi, 20% grandi (prima: 35/35/30)
-# 4. ✅ Range piccoli esteso: 0.02-0.05 → 0.01-0.05 (cattura oggetti piccolissimi 1-5%)
-# 5. ✅ Perspective-Aware Placement (ClimaOoD): oggetti in basso = più grandi (realismo fisico)
-# 6. ✅ Drivable Region Constraints (ClimaOoD): oggetti solo su road/sidewalk (coerenza spaziale)
+# OTTIMIZZAZIONI APPLICATE (dopo risultati epoch 5):
+# 1. ✅ Learning Rate: 5e-6 → 3e-6 (maggiore stabilità)
+# 2. ✅ Paste probability: 0.20 → 0.18 (bilanciamento esposizione/stabilità)
+# 3. ✅ Distribuzione pesata prioritizzata: 60% piccoli, 30% medi, 10% grandi (prima: 50/30/20)
+# 4. ✅ Range piccoli: 0.01-0.05 → 0.02-0.06 (oggetti piccoli MA riconoscibili, 2-6% vs 1-5%)
+# 5. ✅ coco_min_area: 1500 → 1000 (include più oggetti piccoli di qualità)
+# 6. ✅ Perspective-Aware Placement (ClimaOoD): oggetti in basso = più grandi (realismo fisico)
+# 7. ✅ Drivable Region Constraints (ClimaOoD): oggetti solo su road/sidewalk (coerenza spaziale)
+# 8. ✅ mIoU monitorato: checkpoint salvati basati su metrics/val_iou_all (mIoU più alto = migliori risultati)
+#
+# RISULTATI EPOCH 5:
+# - RoadObstacle21: AUPRC 89.83% (+3.02%), FPR@95TPR 0.48% (-7.18%) ✅ ECCELLENTE!
+# - LostFound: AUPRC 18.06% (-0.52%) ❌ NESSUN MIGLIORAMENTO → ottimizzazioni applicate
+# - fs_static: AUPRC 52.79% (-1.67%) ❌ PEGGIORATO → ottimizzazioni applicate
 #
 # VANTAGGI:
-# 1. Mantiene 100% mIoU Cityscapes (backbone intatto)
+# 1. Mantiene mIoU Cityscapes (backbone frozen) → monitorato con metrics/val_iou_all (target: ~80-82%)
 # 2. Decoder impara solo a riconoscere outliers COCO come "no object"
-# 3. Priorità a anomalie piccole (LostFound/fs_static) → 50% oggetti piccoli
-# 4. Preserva RoadObstacle21 (anomalie grandi) → 20% oggetti grandi
+# 3. Priorità a anomalie piccole (LostFound/fs_static) → 60% oggetti piccoli (↑ da 50%)
+# 4. Preserva RoadObstacle21 (anomalie grandi) → 10% oggetti grandi (già eccellente 89.83% AUPRC)
 # 5. Perspective-Aware + Drivable Regions migliorano realismo (ispirato da ClimaOoD)
-# 6. Allineato con best practices OE (RbA paper) + ClimaOoD (perspective-aware placement)
+# 6. Range 0.02-0.06 evita oggetti troppo piccoli (~10px) non riconoscibili
+# 7. Allineato con best practices OE (RbA paper) + ClimaOoD (perspective-aware placement)
 #
 # PARAMETRI TRAINABILI:
 # - Scale blocks (cross-attention tra ViT e queries)
@@ -41,15 +49,18 @@ trainer:
   precision: "16-mixed"
   
   # Checkpoint su Google Drive
+  # IMPORTANTE: Monitora mIoU (val_iou_all) perché mIoU più alto = migliori risultati anomaly detection
+  # Con frozen backbone, mIoU dovrebbe essere preservato (~80-82% su Cityscapes val)
+  # Se mIoU scende <75%, il modello sta disimparando → ferma training o riduci LR
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: "/content/drive/MyDrive/eomt_oe_frozen_backbone"
         filename: "eomt_frozen-{epoch:03d}-{metrics/val_iou_all:.4f}"
-        monitor: "metrics/val_iou_all"
-        mode: "max"
-        save_top_k: 3
-        save_last: true
+        monitor: "metrics/val_iou_all"  # mIoU su Cityscapes validation set
+        mode: "max"  # Salva checkpoint con mIoU più alto (preserva performance in-distribution)
+        save_top_k: 3  # Salva top 3 checkpoint per mIoU
+        save_last: true  # Salva sempre ultimo checkpoint
         every_n_epochs: 1
   
   logger:
@@ -57,7 +68,7 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "OE_FrozenBackbone_lr3e6_LogitNorm_weightedScale50_PerspectiveAware_ClimaOoD"
+      name: "OE_FrozenBackbone_lr3e6_LogitNorm_weightedScale60_PerspectiveAware_ClimaOoD_v2"
 
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
@@ -156,41 +167,59 @@ data:
     # 2. coco_min_area troppo basso (600 vs 1500) → TROPPO BASSO, oggetti di bassa qualità ✅ CORRETTO: 1500
     # 3. train2017 SENZA distribuzione pesata → troppa varietà casuale senza controllo
     #
-    # SOLUZIONE: Parametri OTTIMIZZATI per anomalie piccole + Distribuzione pesata PRIORITIZZATA
-    # - paste_probability: 0.20 (aumentato da 0.15) per più esposizione outlier ✅ OTTIMIZZATO
-    #   MOTIVAZIONE: Risultati epoch 4 mostrano LostFound 18.58% AUPRC → serve più esposizione
-    #   Aumento a 0.20 per ~33% più outlier per batch (da 15% a 20% batch con OE)
-    # - coco_min_area: 1500 (valore originale funzionante) ✅ CRITICO!
-    # - Distribuzione pesata (50% piccoli, 30% medi, 20% grandi) PRIORITIZZA anomalie piccole ✅ OTTIMIZZATO
-    #   MOTIVAZIONE: LostFound/fs_static hanno anomalie 1-5% → serve 50% oggetti piccoli
-    # - Scale ranges OTTIMIZZATI per catturare oggetti piccolissimi (0.01-0.05) ✅ OTTIMIZZATO
-    paste_probability: 0.20  # OTTIMIZZATO: aumentato da 0.15 per più esposizione (LostFound 18.58% → target miglioramento)
+    # SOLUZIONE: Parametri OTTIMIZZATI per anomalie piccole (dopo risultati epoch 5)
+    # ANALISI RISULTATI EPOCH 5:
+    # - RoadObstacle21: AUPRC 86.81% → 89.83% (+3.02%) ✅ ECCELLENTE! FPR@95TPR 0.48% (migliorato!)
+    # - LostFound: AUPRC 18.58% → 18.06% (-0.52%) ❌ NESSUN MIGLIORAMENTO
+    # - fs_static: AUPRC 54.46% → 52.79% (-1.67%) ❌ PEGGIORATO
+    # PROBLEMA: Range 0.01-0.05 troppo piccolo → oggetti 1% immagine (~10px) troppo piccoli per riconoscimento
+    # SOLUZIONE: Bilanciare per includere oggetti piccoli MA riconoscibili
+    #
+    # - paste_probability: 0.18 (ridotto da 0.20) per ridurre confusione ✅ OTTIMIZZATO
+    #   MOTIVAZIONE: 0.20 potrebbe essere troppo alto → confonde il modello
+    #   Ridotto a 0.18 per bilanciare esposizione e stabilità (compromesso tra 0.15 e 0.20)
+    # - coco_min_area: 1000 (ridotto da 1500) per includere più oggetti piccoli di qualità ✅ OTTIMIZZATO
+    #   MOTIVAZIONE: 1500 filtra via oggetti piccoli validi → ridotto a 1000 per includere piccoli ma ben definiti
+    #   COCO standard: Small <1024px, Medium 1024-9216px → 1000px è nella categoria Medium (qualità OK)
+    # - Distribuzione pesata (60% piccoli, 30% medi, 10% grandi) PRIORITIZZA anomalie piccole ✅ OTTIMIZZATO
+    #   MOTIVAZIONE: LostFound/fs_static hanno anomalie 1-5% → serve 60% oggetti piccoli (↑ da 50%)
+    #   Ridotto grandi a 10% perché RoadObstacle21 già eccellente (89.83% AUPRC) → può tollerare meno grandi
+    # - Scale ranges OTTIMIZZATI: [0.02, 0.06] per oggetti piccoli ma riconoscibili ✅ OTTIMIZZATO
+    #   MOTIVAZIONE: Range 0.01-0.05 troppo piccolo (1% = ~10px) → aumentato a 0.02-0.06 (2-6% = ~20-60px)
+    #   Evita oggetti troppo piccoli per riconoscimento, ma mantiene focus su anomalie piccole
+    paste_probability: 0.18  # OTTIMIZZATO: ridotto da 0.20 per bilanciare esposizione e stabilità (LostFound 18.06% → target miglioramento)
     min_objects: 1
     max_objects: 1           # VALIDATO: stesso del config funzionante (più stabile)
     
-    # Distribuzione pesata multi-scale PRIORITIZZATA per anomalie piccole (50% piccoli, 30% medi, 20% grandi)
-    # OTTIMIZZATA dopo risultati epoch 4: LostFound 18.58% AUPRC, fs_static 54.46% AUPRC → anomalie piccolissime (1-5%)
-    # PRIORITÀ: 50% oggetti piccoli per matchare LostFound/fs_static, preservando RoadObstacle21 (20% grandi)
-    # IMPORTANTE: Range piccoli ESTESO a 0.01-0.05 per catturare oggetti piccolissimi (1% immagine)
-    # RoadObstacle21 ha anomalie fino al 40% → range grandi 0.10-0.30 preserva performance (20% prob)
+    # Distribuzione pesata multi-scale PRIORITIZZATA per anomalie piccole (60% piccoli, 30% medi, 10% grandi)
+    # OTTIMIZZATA dopo risultati epoch 5: LostFound 18.06% AUPRC, fs_static 52.79% AUPRC → serve più focus su piccoli
+    # PRIORITÀ: 60% oggetti piccoli per matchare LostFound/fs_static (↑ da 50%)
+    # RoadObstacle21 già eccellente (89.83% AUPRC) → può tollerare riduzione a 10% grandi (↓ da 20%)
+    # IMPORTANTE: Range piccoli [0.02, 0.06] per oggetti piccoli MA riconoscibili (2-6% = ~20-60px a 1024x1024)
+    # Evita range 0.01-0.05 che produce oggetti troppo piccoli (~10px) difficilmente riconoscibili
     use_weighted_scale: true  # Abilita distribuzione pesata prioritizzata per anomalie piccole
     scale_ranges:
-      - [0.01, 0.05]   # Piccoli: 1-5% immagine (50% prob) ✅ OTTIMIZZATO: range esteso 0.01-0.05 per oggetti piccolissimi
-        # MOTIVAZIONE: LostFound/fs_static hanno anomalie 1-5% → range 0.01-0.05 matcha meglio
-        # Prima era 0.02-0.05 → ora 0.01-0.05 per catturare oggetti ancora più piccoli (1% vs 2%)
+      - [0.02, 0.06]   # Piccoli: 2-6% immagine (60% prob) ✅ OTTIMIZZATO: range [0.02, 0.06] per oggetti piccoli MA riconoscibili
+        # MOTIVAZIONE: Range 0.01-0.05 troppo piccolo (1% = ~10px) → aumentato minimo a 0.02 (2% = ~20px)
+        # Range 0.02-0.06 cattura oggetti piccoli (2-6% = ~20-60px) MA riconoscibili
+        # LostFound/fs_static hanno anomalie 1-5% → range 0.02-0.06 è un buon compromesso
       - [0.05, 0.10]   # Medi: 5-10% immagine (30% prob) → matcha RoadAnomaly piccole/medie
-      - [0.10, 0.30]   # Grandi: 10-30% immagine (20% prob) → PRESERVA RoadObstacle21 (anomalie grandi fino a 40%!)
-        # Ridotto peso da 30% a 20% per priorizzare anomalie piccole, ma mantiene range per RoadObstacle21
-    scale_weights: [0.50, 0.30, 0.20]  # ✅ OTTIMIZZATO: 50% piccoli (↑ da 35%), 30% medi (↓ da 35%), 20% grandi (↓ da 30%)
-    # MOTIVAZIONE: Risultati epoch 4 mostrano LostFound 18.58% AUPRC → serve 50% oggetti piccoli per convergenza
+      - [0.10, 0.30]   # Grandi: 10-30% immagine (10% prob) → PRESERVA RoadObstacle21 (già 89.83% AUPRC!)
+        # Ridotto peso da 20% a 10% perché RoadObstacle21 già eccellente → più focus su piccoli
+    scale_weights: [0.60, 0.30, 0.10]  # ✅ OTTIMIZZATO: 60% piccoli (↑ da 50%), 30% medi (stabile), 10% grandi (↓ da 20%)
+    # MOTIVAZIONE: Risultati epoch 5 mostrano LostFound 18.06% AUPRC → serve 60% oggetti piccoli per convergenza
+    # RoadObstacle21 già eccellente (89.83% AUPRC, FPR@95TPR 0.48%) → può tollerare riduzione a 10% grandi
     
     # Parametri legacy (ignorati se use_weighted_scale=true):
     min_scale: 0.08          # Ignorato se use_weighted_scale=true (valore originale funzionante)
     max_scale: 0.15          # Ignorato se use_weighted_scale=true (valore originale funzionante)
-    coco_min_area: 1500      # CRITICO: VALIDATO dal config funzionante (RoadObstacle21 92%)
-    # IMPORTANTE: coco_min_area=1500 è ESSENZIALE! Il config funzionante aveva 1500, non 800!
+    coco_min_area: 1000      # OTTIMIZZATO: ridotto da 1500 per includere più oggetti piccoli di qualità
+    # MOTIVAZIONE (risultati epoch 5): LostFound 18.06% AUPRC, fs_static 52.79% AUPRC → serve più oggetti piccoli
+    # 1500 filtra via troppi oggetti piccoli validi → ridotto a 1000 per includere piccoli ma ben definiti
     # COCO standard: Small <1024px, Medium 1024-9216px, Large >9216px
-    # 1500px è nella categoria "Medium" (ben definiti, non rumore) ✅
+    # 1000px è nella categoria "Medium" (qualità OK, non rumore) ✅
+    # Trade-off: Include più oggetti piccoli ma mantiene qualità (1000px = ~31x31px a risoluzione media)
+    # RoadObstacle21 già eccellente (89.83% AUPRC) → può tollerare leggera riduzione qualità oggetti grandi
     
     # ===== PERSPECTIVE-AWARE PLACEMENT (Ispirato da ClimaOoD) =====
     # Migliora il realismo fisico degli oggetti incollati
