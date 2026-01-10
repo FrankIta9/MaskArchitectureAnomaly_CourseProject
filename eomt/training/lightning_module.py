@@ -95,7 +95,74 @@ class LightningModule(lightning.LightningModule):
         elif ckpt_path:
             ckpt = self._load_ckpt(ckpt_path, load_ckpt_class_head)
             incompatible_keys = self.load_state_dict(ckpt, strict=False)
+            
+            # Check if class_head weights were loaded correctly
+            if load_ckpt_class_head:
+                # Check both in checkpoint and in model (after loading)
+                class_head_keys_in_ckpt = [k for k in ckpt.keys() if "class_head" in k]
+                class_head_keys_in_model = [k for k, _ in self.named_parameters() if "class_head" in k]
+                
+                if class_head_keys_in_ckpt:
+                    logging.info(f"✅ Found class_head weights in checkpoint: {class_head_keys_in_ckpt}")
+                    # Verify they were actually loaded (check if missing_keys contains class_head)
+                    if incompatible_keys.missing_keys:
+                        missing_class_head = [k for k in incompatible_keys.missing_keys if "class_head" in k]
+                        if missing_class_head:
+                            logging.warning(f"⚠️ class_head keys found in checkpoint but NOT loaded: {missing_class_head}")
+                            logging.warning("   This means shapes/dimensions don't match - using random initialization!")
+                            # Re-initialize more safely
+                            with torch.no_grad():
+                                if hasattr(self.network, 'class_head'):
+                                    nn.init.xavier_uniform_(self.network.class_head.weight, gain=0.1)
+                                    if self.network.class_head.bias is not None:
+                                        nn.init.zeros_(self.network.class_head.bias)
+                                    logging.info("✅ Re-initialized class_head with Xavier uniform (gain=0.1) for stability")
+                        else:
+                            logging.info(f"✅ class_head weights loaded successfully into model")
+                        else:
+                            logging.info(f"✅ class_head weights loaded successfully (no missing keys)")
+                            # Verify loaded weights are finite (safety check)
+                            with torch.no_grad():
+                                if hasattr(self.network, 'class_head'):
+                                    if not torch.isfinite(self.network.class_head.weight).all():
+                                        num_invalid = (~torch.isfinite(self.network.class_head.weight)).sum().item()
+                                        logging.warning(f"⚠️ class_head.weight contains {num_invalid} non-finite values after loading!")
+                                        # Clean non-finite values
+                                        self.network.class_head.weight.data = torch.where(
+                                            torch.isfinite(self.network.class_head.weight),
+                                            self.network.class_head.weight,
+                                            torch.zeros_like(self.network.class_head.weight)
+                                        )
+                                        logging.info("✅ Cleaned non-finite values from class_head.weight")
+                else:
+                    logging.warning("⚠️ class_head weights NOT found in checkpoint - using random initialization!")
+                    logging.warning(f"   This is OK if checkpoint doesn't contain class_head, but may cause numerical issues.")
+                    logging.warning(f"   Consider using a checkpoint that includes class_head weights or set load_ckpt_class_head=False")
+                    # Initialize more safely with smaller variance
+                    with torch.no_grad():
+                        if hasattr(self.network, 'class_head'):
+                            nn.init.xavier_uniform_(self.network.class_head.weight, gain=0.1)  # Smaller gain for stability
+                            if self.network.class_head.bias is not None:
+                                nn.init.zeros_(self.network.class_head.bias)
+                            logging.info("✅ Initialized class_head with Xavier uniform (gain=0.1) for numerical stability")
+            
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
+            
+            # Final verification: ensure all class_head parameters are finite after loading
+            with torch.no_grad():
+                if hasattr(self.network, 'class_head'):
+                    all_finite = torch.isfinite(self.network.class_head.weight).all()
+                    if self.network.class_head.bias is not None:
+                        all_finite = all_finite and torch.isfinite(self.network.class_head.bias).all()
+                    if not all_finite:
+                        logging.error("❌ class_head contains non-finite values after all checks! This will cause training issues!")
+                        # Emergency fix: re-initialize completely
+                        nn.init.xavier_uniform_(self.network.class_head.weight, gain=0.1)
+                        if self.network.class_head.bias is not None:
+                            nn.init.zeros_(self.network.class_head.bias)
+                        logging.warning("✅ Emergency re-initialization of class_head completed")
+                    else:
+                        logging.info("✅ class_head parameters verified finite and ready for training")
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
@@ -226,8 +293,13 @@ class LightningModule(lightning.LightningModule):
                     )
                 
                 # Additional safety: clamp gradient to reasonable range
-                # This prevents extreme gradients that could cause numerical instability
-                torch.clamp_(param.grad, min=-100.0, max=100.0)
+                # More aggressive clamping for class_head (most sensitive to numerical issues)
+                if "class_head" in name:
+                    # Class head is sensitive - use tighter clamping
+                    torch.clamp_(param.grad, min=-50.0, max=50.0)
+                else:
+                    # Other parameters can tolerate slightly larger gradients
+                    torch.clamp_(param.grad, min=-100.0, max=100.0)
             
             # Check if parameter contains NaN/Inf
             if not torch.isfinite(param.data).all():
@@ -1012,7 +1084,16 @@ class LightningModule(lightning.LightningModule):
         if cleaned_keys > 0:
             logging.warning(f"⚠️ Cleaned {cleaned_keys} parameters with complex/NaN/Inf values")
         
-        logging.info(f"Loaded {len(ckpt)} keys")
+        # Log which keys were loaded (especially important for debugging)
+        class_head_keys = [k for k in ckpt.keys() if "class_head" in k]
+        if class_head_keys:
+            logging.info(f"✅ Found class_head weights in checkpoint: {class_head_keys}")
+        else:
+            if load_ckpt_class_head:
+                logging.warning("⚠️ class_head weights NOT found in checkpoint!")
+                logging.warning(f"   Checkpoint keys (sample): {list(ckpt.keys())[:10]}...")
+        
+        logging.info(f"Loaded {len(ckpt)} keys from checkpoint")
         return ckpt
 
     def _raise_on_incompatible(self, incompatible_keys, load_ckpt_class_head):
