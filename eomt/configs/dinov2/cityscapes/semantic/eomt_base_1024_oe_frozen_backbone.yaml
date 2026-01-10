@@ -46,7 +46,7 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "OE_FrozenBackbone_lr1e6_LogitNorm_weightedScale"
+      name: "OE_FrozenBackbone_lr1e6_LogitNorm_weightedScale_v2"
 
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
@@ -63,24 +63,26 @@ model:
     # ===== LR ULTRA-CONSERVATIVO =====
     # 1e-6 = estremamente conservativo anche per decoder-only
     # Garantisce massima stabilità + compatibilità con logit_norm
+    # VALIDATO: stesso LR del config che ha dato RoadObstacle21 92% AUPRC, FPR 0.51%
     lr: 1e-6
     llrd: 0.8  # Ignorato (backbone frozen), ma lasciato per compatibility
     
     # ===== ENERGY OOD CON WARMUP =====
-    # IMPORTANTE: Se riparti da pesi già addestrati (es. epoch 16), imposta warmup_start_epoch
-    # Questo fa "saltare" il warmup perché il modello è già pronto
+    # VALIDATO: energy_warmup_epochs=10 è OK per max_epochs=30 (33% del training)
+    # Il config funzionante (RoadObstacle21 92%) aveva energy_warmup_epochs=10
+    # Partendo da 0, il warmup graduale è essenziale per stabilità
     energy_ood_enabled: true
-    energy_ood_max_weight: 0.002  # Conservative (come ultraconservative)
-    energy_warmup_epochs: 10  # Warmup medio
-    energy_warmup_start_epoch: 0  # REVERT a 0 (riparti da capo con energy warmup normale)
-    # IMPORTANTE: Se hai estratto pesi da epoch 16, riparti da capo con energy warmup graduale
-    # Questo evita instabilità da energy loss attiva subito su modello non esposto a energy loss
+    energy_ood_max_weight: 0.002  # Conservative (validato: stesso del config funzionante)
+    energy_warmup_epochs: 10  # VALIDATO: 10 epochs (33% di 30) come config funzionante
+    energy_warmup_start_epoch: 0  # Partiamo da 0 (riparti da capo con energy warmup normale)
     # All'epoch 0 → adjusted=0 (<10) → Energy DISABLED fino a epoch 10 (come previsto)
+    # Epochs 0-9: Energy DISABLED (solo OE + loss standard)
+    # Epochs 10-30: Energy ATTIVATO gradualmente (cosine warmup 0→0.002)
     max_epochs: 30
     
     # ===== LOGIT NORMALIZATION ENABLED =====
     # Normalizza logits per migliorare calibrazione anomaly scores
-    # Funzionava bene nei test precedenti
+    # VALIDATO: funzionava bene nel config che ha dato RoadObstacle21 92%
     logit_norm_enabled: true
     logit_norm_tau: 0.04
     logit_norm_eps: 1e-6
@@ -101,7 +103,7 @@ data:
     path: "/content/drive/MyDrive/Cityscapes"
     
     # Batch size ridotto per limiti memoria VRAM
-    batch_size: 2  # Ridotto da 6 per limiti memoria
+    batch_size: 2  # Ridotto da 6 per limiti memoria (config funzionante aveva batch_size=6)
     num_workers: 8
     
     img_size: [1024, 1024]
@@ -113,43 +115,54 @@ data:
     # ===== OUTLIER EXPOSURE OTTIMIZZATO =====
     coco_path: "/content/drive/MyDrive/coco2017_zips"
     coco_split: "train2017"  # Usa train2017 per più varietà (gestiamo noi la distribuzione pesata)
-    # MOTIVAZIONE: Con distribuzione pesata multi-scale (35% piccoli, 35% medi, 30% grandi)
-    # gestiamo noi la varietà, quindi train2017 (~500k oggetti) è perfetto per più varietà
+    # MOTIVAZIONE: Con distribuzione pesata multi-scale e coco_min_area=1500 (più alto),
+    # train2017 (~500k oggetti) è perfetto per più varietà controllata
+    # Compensiamo coco_min_area più alto (1500 vs 800) con più varietà train2017
     # Vantaggi: ~500k oggetti validi vs ~18k (val2017) → molto più varietà senza problemi di stabilità
     # Con 1 oggetto/batch al 15%, uso ~445 oggetti/epoch → train2017 evita ripetizioni e migliora learning
     use_coco_zip: true
     
     # ===== DISTRIBUZIONE PESATA MULTI-SCALE BILANCIATA =====
+    # ANALISI PARAMETRI FUNZIONANTI (RoadObstacle21 92% AUPRC, FPR 0.51%):
+    # - paste_probability: 0.15 ✅ (stesso del config funzionante)
+    # - min_scale: 0.08, max_scale: 0.15 (uniforme) → NOI: distribuzione pesata per matchare anomalie diverse
+    # - coco_min_area: 1500 ✅ (CRITICO! config funzionante aveva 1500, non 800!)
+    # - coco_split: val2017 (config funzionante) → NOI: train2017 per più varietà (compensato con coco_min_area=1500)
+    #
     # PROBLEMA IDENTIFICATO: RoadObstacle21 stava disimparando PRIMA della distribuzione pesata
     # - RoadObstacle21: anomalie GRANDI/MEDIE (10-40%) → FPR@95TPR passato da 0.51% a 10.98% (20x peggioramento!)
     # - fs_static/LostFound: anomalie PICCOLISSIME (1-5%) → basso AUPRC
     # - RoadAnomaly: anomalie MISTE (5-40%) → migliorato (+1.84%)
     #
     # CAUSE PROBABILI DEL DISIMPARAMENTO:
-    # 1. paste_probability: 0.20 (era 0.15) → TROPPO ALTO, confonde il modello
+    # 1. paste_probability: 0.20 (era 0.15) → TROPPO ALTO, confonde il modello ✅ CORRETTO: 0.15
     # 2. min_scale/max_scale: 0.03/0.08 (erano 0.08/0.15) → TROPPO PICCOLI per RoadObstacle21
-    # 3. coco_min_area: 600 (era 800) → TROPPO BASSO, oggetti di bassa qualità
+    # 3. coco_min_area: 600 (era 1500!) → TROPPO BASSO, oggetti di bassa qualità ❌ CORRETTO: 1500
     # 4. train2017 SENZA distribuzione pesata → troppa varietà casuale senza controllo
     #
-    # SOLUZIONE: Parametri CONSERVATIVI + Distribuzione pesata BILANCIATA + train2017
-    # - Ridurre paste_probability a 0.15 (valore originale che funzionava)
+    # SOLUZIONE: Parametri VALIDATI + Distribuzione pesata BILANCIATA
+    # - paste_probability: 0.15 (valore originale funzionante) ✅
+    # - coco_min_area: 1500 (valore originale funzionante) ✅ CRITICO!
     # - Distribuzione pesata (35% piccoli, 35% medi, 30% grandi) CONTROLLA la varietà train2017
-    # - train2017 con distribuzione pesata → più varietà MA controllata (best of both worlds)
-    # - Aumentare coco_min_area a 800 per qualità migliore
-    paste_probability: 0.15  # RIDOTTO a 0.15 (valore originale che funzionava bene con RoadObstacle21)
+    # - Scale ranges ESTESI per matchare RoadObstacle21 (anomalie fino al 40%!): grandi fino a 0.25-0.30
+    paste_probability: 0.15  # VALIDATO: stesso del config funzionante (RoadObstacle21 92%)
     min_objects: 1
-    max_objects: 1           # Solo 1 oggetto per volta (più stabile, evita ComplexFloat errors)
+    max_objects: 1           # VALIDATO: stesso del config funzionante (più stabile)
     
     # Distribuzione pesata multi-scale BILANCIATA (35% piccoli, 35% medi, 30% grandi)
-    # Priorità a preservare RoadObstacle21 (30% grandi) mentre miglioriamo fs_static/LostFound (35% piccoli)
+    # Priorità a preservare RoadObstacle21 (30% grandi fino a 0.30) mentre miglioriamo fs_static/LostFound (35% piccoli)
+    # IMPORTANTE: RoadObstacle21 ha anomalie fino al 40% → range grandi esteso a 0.10-0.30 (non solo 0.18!)
     use_weighted_scale: true  # Abilita distribuzione pesata bilanciata
     scale_ranges:
-      - [0.02, 0.05]   # Piccoli: 2-5% immagine (35% prob) → matcha fs_static/LostFound
+      - [0.02, 0.05]   # Piccoli: 2-5% immagine (35% prob) → matcha fs_static/LostFound anomalie piccolissime
       - [0.05, 0.10]   # Medi: 5-10% immagine (35% prob) → matcha RoadAnomaly piccole/medie
-      - [0.10, 0.18]   # Grandi: 10-18% immagine (30% prob) → PRESERVA RoadObstacle21 (anomalie grandi!)
+      - [0.10, 0.30]   # Grandi: 10-30% immagine (30% prob) → PRESERVA RoadObstacle21 (anomalie grandi fino a 40%!)
     scale_weights: [0.35, 0.35, 0.30]  # 35% piccoli, 35% medi, 30% grandi (BILANCIATO verso grandi)
     
     # Parametri legacy (ignorati se use_weighted_scale=true):
-    min_scale: 0.03          # Ignorato se use_weighted_scale=true
-    max_scale: 0.08          # Ignorato se use_weighted_scale=true
-    coco_min_area: 800       # AUMENTATO a 800 (valore originale) per qualità migliore e stabilità
+    min_scale: 0.08          # Ignorato se use_weighted_scale=true (valore originale funzionante)
+    max_scale: 0.15          # Ignorato se use_weighted_scale=true (valore originale funzionante)
+    coco_min_area: 1500      # CRITICO: VALIDATO dal config funzionante (RoadObstacle21 92%)
+    # IMPORTANTE: coco_min_area=1500 è ESSENZIALE! Il config funzionante aveva 1500, non 800!
+    # COCO standard: Small <1024px, Medium 1024-9216px, Large >9216px
+    # 1500px è nella categoria "Medium" (ben definiti, non rumore) ✅
