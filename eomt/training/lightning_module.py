@@ -1000,11 +1000,16 @@ class LightningModule(lightning.LightningModule):
         # Gestisci checkpoint con solo pesi modello (senza optimizer state)
         # Se il checkpoint non ha optimizer_states, rimuoviamo le chiavi correlate per evitare errori
         # Questo permette di riprendere il training da checkpoint con solo pesi (riparti da capo con nuovo optimizer)
-        has_optimizer_state = "optimizer_states" in checkpoint and checkpoint["optimizer_states"]
+        has_optimizer_state = (
+            "optimizer_states" in checkpoint 
+            and checkpoint.get("optimizer_states") is not None
+            and len(checkpoint.get("optimizer_states", [])) > 0
+        )
+        
         if not has_optimizer_state:
             # Checkpoint contiene solo pesi del modello → rimuoviamo eventuali chiavi optimizer/scheduler per evitare errori
             if "optimizer_states" in checkpoint:
-                logging.info("ℹ️ Checkpoint contains only model weights (no optimizer state) → will re-initialize optimizer")
+                logging.warning("⚠️ Checkpoint contains only model weights (no optimizer state) → will re-initialize optimizer")
                 del checkpoint["optimizer_states"]
             if "lr_schedulers" in checkpoint:
                 del checkpoint["lr_schedulers"]
@@ -1016,11 +1021,8 @@ class LightningModule(lightning.LightningModule):
                 checkpoint["global_step"] = 0
             logging.info("✅ Checkpoint prepared for restart (only model weights loaded, optimizer will be re-initialized)")
         else:
-            # Clean optimizer state if present (may contain corrupted values)
-            logging.warning("⚠️ Removing optimizer states from checkpoint (may contain corrupted values)")
-            del checkpoint["optimizer_states"]
-            if "lr_schedulers" in checkpoint:
-                del checkpoint["lr_schedulers"]
+            # Checkpoint HA optimizer state → mantienili intatti per resume completo
+            logging.info("✅ Checkpoint contains optimizer state → will resume training with full state")
 
     def _zero_init_outside_encoder(
         self, encoder_prefix="network.encoder.", skip_class_head=False
