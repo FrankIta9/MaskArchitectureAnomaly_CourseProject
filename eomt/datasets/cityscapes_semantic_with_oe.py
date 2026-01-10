@@ -42,6 +42,10 @@ class CityscapesSemanticWithOE(LightningDataModule):
         min_scale: float = 0.1,
         max_scale: float = 0.3,
         coco_min_area: int = 1000,
+        # Multi-scale weighted distribution (for better matching with small anomalies)
+        use_weighted_scale: bool = False,
+        scale_ranges: Optional[list] = None,  # [(min1, max1), (min2, max2), ...]
+        scale_weights: Optional[list] = None,  # [weight1, weight2, ...] (should sum to 1.0)
     ) -> None:
         """
         Args:
@@ -82,6 +86,9 @@ class CityscapesSemanticWithOE(LightningDataModule):
                     max_objects=max_objects,
                     min_scale=min_scale,
                     max_scale=max_scale,
+                    use_weighted_scale=use_weighted_scale,
+                    scale_ranges=scale_ranges,
+                    scale_weights=scale_weights,
                 )
                 print(f"Outlier Exposure enabled with {len(coco_dataset)} COCO objects")
             except Exception as e:

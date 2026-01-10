@@ -46,13 +46,15 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "OE_FrozenBackbone_lr1e6_LogitNorm_paste15_stable"
+      name: "OE_FrozenBackbone_lr1e6_LogitNorm_weightedScale"
 
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
   init_args:
-    # Pesi Cityscapes puliti
+    # Pesi Cityscapes puliti (riparti da capo con distribuzione pesata)
     ckpt_path: "/content/drive/MyDrive/eomt_cityscapes.bin"
+    # IMPORTANTE: Riparti da pesi Cityscapes puliti (non da epoch 16) per evitare disimparamento
+    # Con distribuzione pesata + parametri conservativi, il training sarà più stabile
     
     attn_mask_annealing_enabled: True
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
@@ -65,10 +67,15 @@ model:
     llrd: 0.8  # Ignorato (backbone frozen), ma lasciato per compatibility
     
     # ===== ENERGY OOD CON WARMUP =====
-    # Conservativo per compatibilità con logit_norm
+    # IMPORTANTE: Se riparti da pesi già addestrati (es. epoch 16), imposta warmup_start_epoch
+    # Questo fa "saltare" il warmup perché il modello è già pronto
     energy_ood_enabled: true
     energy_ood_max_weight: 0.002  # Conservative (come ultraconservative)
-    energy_warmup_epochs: 10  # Warmup medio (era 5)
+    energy_warmup_epochs: 10  # Warmup medio
+    energy_warmup_start_epoch: 0  # REVERT a 0 (riparti da capo con energy warmup normale)
+    # IMPORTANTE: Se hai estratto pesi da epoch 16, riparti da capo con energy warmup graduale
+    # Questo evita instabilità da energy loss attiva subito su modello non esposto a energy loss
+    # All'epoch 0 → adjusted=0 (<10) → Energy DISABLED fino a epoch 10 (come previsto)
     max_epochs: 30
     
     # ===== LOGIT NORMALIZATION ENABLED =====
@@ -105,20 +112,44 @@ data:
     
     # ===== OUTLIER EXPOSURE OTTIMIZZATO =====
     coco_path: "/content/drive/MyDrive/coco2017_zips"
-    coco_split: "train2017"  # Era val2017 → train2017 per più varietà
-    # MOTIVAZIONE: Con max_objects=1 e paste_prob=0.15, train2017 è stabile
-    # Vantaggi: ~500k oggetti validi vs ~18k (val2017) → molto più varietà
-    # Con 1 oggetto/batch al 15%, uso ~445 oggetti/epoch → train2017 evita ripetizioni
+    coco_split: "train2017"  # Usa train2017 per più varietà (gestiamo noi la distribuzione pesata)
+    # MOTIVAZIONE: Con distribuzione pesata multi-scale (35% piccoli, 35% medi, 30% grandi)
+    # gestiamo noi la varietà, quindi train2017 (~500k oggetti) è perfetto per più varietà
+    # Vantaggi: ~500k oggetti validi vs ~18k (val2017) → molto più varietà senza problemi di stabilità
+    # Con 1 oggetto/batch al 15%, uso ~445 oggetti/epoch → train2017 evita ripetizioni e migliora learning
     use_coco_zip: true
     
-    # Parametri OE ottimizzati per anomalie piccole (fs_static, RoadAnomaly)
-    # PROBLEMA: fs_static (49% AUPRC) e RoadAnomaly (74% AUPRC) hanno anomalie PICCOLE (0.5-5%)
-    # SOLUZIONE: Ridurre scala oggetti COCO per matchare anomalie piccole dei dataset di test
-    # RoadAnomaly21: anomalie 0.5%-40% immagine (molte piccole <5%)
-    # fs_static: oggetti Pascal VOC piccoli e complessi su Cityscapes
-    paste_probability: 0.15  # 15% batch con outliers (conservativo per stabilità)
+    # ===== DISTRIBUZIONE PESATA MULTI-SCALE BILANCIATA =====
+    # PROBLEMA IDENTIFICATO: RoadObstacle21 stava disimparando PRIMA della distribuzione pesata
+    # - RoadObstacle21: anomalie GRANDI/MEDIE (10-40%) → FPR@95TPR passato da 0.51% a 10.98% (20x peggioramento!)
+    # - fs_static/LostFound: anomalie PICCOLISSIME (1-5%) → basso AUPRC
+    # - RoadAnomaly: anomalie MISTE (5-40%) → migliorato (+1.84%)
+    #
+    # CAUSE PROBABILI DEL DISIMPARAMENTO:
+    # 1. paste_probability: 0.20 (era 0.15) → TROPPO ALTO, confonde il modello
+    # 2. min_scale/max_scale: 0.03/0.08 (erano 0.08/0.15) → TROPPO PICCOLI per RoadObstacle21
+    # 3. coco_min_area: 600 (era 800) → TROPPO BASSO, oggetti di bassa qualità
+    # 4. train2017 SENZA distribuzione pesata → troppa varietà casuale senza controllo
+    #
+    # SOLUZIONE: Parametri CONSERVATIVI + Distribuzione pesata BILANCIATA + train2017
+    # - Ridurre paste_probability a 0.15 (valore originale che funzionava)
+    # - Distribuzione pesata (35% piccoli, 35% medi, 30% grandi) CONTROLLA la varietà train2017
+    # - train2017 con distribuzione pesata → più varietà MA controllata (best of both worlds)
+    # - Aumentare coco_min_area a 800 per qualità migliore
+    paste_probability: 0.15  # RIDOTTO a 0.15 (valore originale che funzionava bene con RoadObstacle21)
     min_objects: 1
-    max_objects: 1           # Solo 1 oggetto per volta (più stabile)
-    min_scale: 0.03          # Era 0.08 → Ridotto a 3% per includere anomalie piccole (0.5-5%)
-    max_scale: 0.08          # Era 0.15 → Ridotto a 8% per matchare anomalie piccole ma ancora visibili
-    coco_min_area: 800       # Era 1500 → Ridotto a 800 per includere oggetti più piccoli (ma ancora ben definiti)
+    max_objects: 1           # Solo 1 oggetto per volta (più stabile, evita ComplexFloat errors)
+    
+    # Distribuzione pesata multi-scale BILANCIATA (35% piccoli, 35% medi, 30% grandi)
+    # Priorità a preservare RoadObstacle21 (30% grandi) mentre miglioriamo fs_static/LostFound (35% piccoli)
+    use_weighted_scale: true  # Abilita distribuzione pesata bilanciata
+    scale_ranges:
+      - [0.02, 0.05]   # Piccoli: 2-5% immagine (35% prob) → matcha fs_static/LostFound
+      - [0.05, 0.10]   # Medi: 5-10% immagine (35% prob) → matcha RoadAnomaly piccole/medie
+      - [0.10, 0.18]   # Grandi: 10-18% immagine (30% prob) → PRESERVA RoadObstacle21 (anomalie grandi!)
+    scale_weights: [0.35, 0.35, 0.30]  # 35% piccoli, 35% medi, 30% grandi (BILANCIATO verso grandi)
+    
+    # Parametri legacy (ignorati se use_weighted_scale=true):
+    min_scale: 0.03          # Ignorato se use_weighted_scale=true
+    max_scale: 0.08          # Ignorato se use_weighted_scale=true
+    coco_min_area: 800       # AUMENTATO a 800 (valore originale) per qualità migliore e stabilità

@@ -887,6 +887,49 @@ class LightningModule(lightning.LightningModule):
         checkpoint["state_dict"] = {
             k.replace("._orig_mod", ""): v for k, v in checkpoint["state_dict"].items()
         }
+    
+    def on_load_checkpoint(self, checkpoint):
+        """
+        Hook chiamato quando Lightning carica un checkpoint automaticamente (resume).
+        Pulisce parametri complessi/NaN/Inf per prevenire ComplexFloat errors.
+        """
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+            cleaned_keys = 0
+            
+            for k, v in state_dict.items():
+                if not isinstance(v, torch.Tensor):
+                    continue
+                
+                # Convert complex to real (take real part)
+                if v.is_complex():
+                    checkpoint["state_dict"][k] = v.real
+                    cleaned_keys += 1
+                    logging.warning(f"⚠️ Cleaned complex parameter in checkpoint: {k}")
+                
+                # Replace NaN/Inf with zeros
+                if not torch.isfinite(v).all():
+                    num_invalid = (~torch.isfinite(v)).sum().item()
+                    checkpoint["state_dict"][k] = torch.where(
+                        torch.isfinite(v), v, torch.zeros_like(v)
+                    )
+                    cleaned_keys += 1
+                    logging.warning(f"⚠️ Cleaned {num_invalid} NaN/Inf values in checkpoint: {k}")
+                
+                # Ensure tensor is real float (not complex)
+                if not checkpoint["state_dict"][k].dtype.is_floating_point:
+                    checkpoint["state_dict"][k] = checkpoint["state_dict"][k].float()
+            
+            if cleaned_keys > 0:
+                logging.warning(f"⚠️ Cleaned {cleaned_keys} parameters with complex/NaN/Inf values in checkpoint")
+        
+        # Clean optimizer state if present (may contain corrupted values)
+        if "optimizer_states" in checkpoint:
+            # Rimuovi optimizer states corrotti per forzare re-inizializzazione
+            logging.warning("⚠️ Removing optimizer states from checkpoint (may contain corrupted values)")
+            del checkpoint["optimizer_states"]
+            if "lr_schedulers" in checkpoint:
+                del checkpoint["lr_schedulers"]
 
     def _zero_init_outside_encoder(
         self, encoder_prefix="network.encoder.", skip_class_head=False
@@ -925,6 +968,10 @@ class LightningModule(lightning.LightningModule):
         return summed
 
     def _load_ckpt(self, ckpt_path, load_ckpt_class_head):
+        """
+        Load checkpoint and clean complex/NaN/Inf values from model weights.
+        This prevents ComplexFloat errors when resuming from corrupted checkpoints.
+        """
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         if "state_dict" in ckpt:
             ckpt = ckpt["state_dict"]
@@ -935,6 +982,36 @@ class LightningModule(lightning.LightningModule):
                 for k, v in ckpt.items()
                 if "class_head" not in k and "class_predictor" not in k
             }
+        
+        # CLEAN COMPLEX/NaN/Inf VALUES: Convert complex to real, replace NaN/Inf with zeros
+        # This is critical when resuming from checkpoints that may contain corrupted optimizer state
+        cleaned_keys = 0
+        for k, v in ckpt.items():
+            if not isinstance(v, torch.Tensor):
+                continue
+            
+            original_dtype = v.dtype
+            
+            # Convert complex to real (take real part)
+            if v.is_complex():
+                ckpt[k] = v.real
+                cleaned_keys += 1
+                logging.warning(f"⚠️ Cleaned complex parameter: {k}")
+            
+            # Replace NaN/Inf with zeros (shouldn't happen, but safety check)
+            if not torch.isfinite(v).all():
+                num_invalid = (~torch.isfinite(v)).sum().item()
+                ckpt[k] = torch.where(torch.isfinite(v), v, torch.zeros_like(v))
+                cleaned_keys += 1
+                logging.warning(f"⚠️ Cleaned {num_invalid} NaN/Inf values in: {k}")
+            
+            # Ensure tensor is real float (not complex)
+            if not ckpt[k].dtype.is_floating_point:
+                ckpt[k] = ckpt[k].float()
+        
+        if cleaned_keys > 0:
+            logging.warning(f"⚠️ Cleaned {cleaned_keys} parameters with complex/NaN/Inf values")
+        
         logging.info(f"Loaded {len(ckpt)} keys")
         return ckpt
 

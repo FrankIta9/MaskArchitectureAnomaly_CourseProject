@@ -248,6 +248,7 @@ class EnergyOODLossWithWarmup(nn.Module):
         warmup_epochs: int = 15,
         max_epochs: int = 50,
         warmup_schedule: str = "cosine",
+        warmup_start_epoch: int = 0,  # Virtual starting epoch for warmup (for resume from weights)
     ):
         super().__init__()
         self.base_loss = EnergyOODLoss(
@@ -259,6 +260,7 @@ class EnergyOODLossWithWarmup(nn.Module):
         self.max_epochs = max_epochs
         self.warmup_schedule = warmup_schedule
         self.max_weight = max_weight
+        self.warmup_start_epoch = warmup_start_epoch  # Virtual starting epoch (e.g., 16 if resuming from epoch 16 weights)
         self.current_epoch = 0
         
     def set_epoch(self, epoch: int):
@@ -269,15 +271,22 @@ class EnergyOODLossWithWarmup(nn.Module):
         """
         Compute current energy weight based on warmup schedule.
         
+        Uses warmup_start_epoch to account for virtual epoch offset when resuming
+        from weights (e.g., if resuming from epoch 16, warmup_start_epoch=16).
+        
         Returns:
             Current weight (0.0 during warmup, then gradually increases)
         """
-        if self.current_epoch < self.warmup_epochs:
+        # Adjust current epoch by warmup_start_epoch offset
+        # This allows skipping warmup when resuming from already-trained weights
+        adjusted_epoch = self.current_epoch + self.warmup_start_epoch
+        
+        if adjusted_epoch < self.warmup_epochs:
             # Phase 1: Energy DISABLED (pure OE training)
             return 0.0
         
         # Phase 2: Gradual warmup
-        progress = (self.current_epoch - self.warmup_epochs) / (
+        progress = (adjusted_epoch - self.warmup_epochs) / (
             self.max_epochs - self.warmup_epochs
         )
         progress = min(1.0, max(0.0, progress))  # Clamp [0, 1]

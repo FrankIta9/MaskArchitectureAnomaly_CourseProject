@@ -36,6 +36,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
         eim_temperature: float = 1.0,
         eim_weight: float = 0.002,  # Max weight after warmup
         energy_warmup_epochs: int = 15,  # Epochs with energy disabled
+        energy_warmup_start_epoch: int = 0,  # Virtual starting epoch (for resume from weights)
         logit_norm_enabled: bool = False,
         logit_norm_tau: float = 0.04,
         logit_norm_eps: float = 1e-6,
@@ -75,6 +76,7 @@ class MaskClassificationLoss(Mask2FormerLoss):
                 warmup_epochs=energy_warmup_epochs,
                 max_epochs=max_epochs,
                 warmup_schedule="cosine",
+                warmup_start_epoch=energy_warmup_start_epoch,  # Virtual starting epoch for resume
             )
         self._last_energy_stats = None  # Store energy stats for logging
 

@@ -46,6 +46,7 @@ class MaskClassificationSemantic(LightningModule):
         energy_ood_enabled: bool = True,
         energy_ood_max_weight: float = 0.002,
         energy_warmup_epochs: int = 15,
+        energy_warmup_start_epoch: int = 0,  # Virtual starting epoch for warmup (for resume from weights)
         max_epochs: int = 50,
         logit_norm_enabled: bool = False,
         logit_norm_tau: float = 0.04,
@@ -90,6 +91,7 @@ class MaskClassificationSemantic(LightningModule):
             eim_temperature=1.0,
             eim_weight=energy_ood_max_weight,  # Max weight after warmup
             energy_warmup_epochs=energy_warmup_epochs,
+            energy_warmup_start_epoch=energy_warmup_start_epoch,  # Virtual starting epoch for resume
             max_epochs=max_epochs,
             logit_norm_enabled=logit_norm_enabled,
             logit_norm_tau=logit_norm_tau,

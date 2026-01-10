@@ -42,6 +42,10 @@ class OutlierExposureTransform(nn.Module):
         min_scale: float = 0.1,
         max_scale: float = 0.3,
         blend_alpha: float = 0.8,
+        # Multi-scale weighted distribution (for better matching with small anomalies)
+        use_weighted_scale: bool = False,
+        scale_ranges: Optional[list] = None,  # [(min1, max1), (min2, max2), ...]
+        scale_weights: Optional[list] = None,  # [weight1, weight2, ...] (sum should be 1.0)
     ):
         """
         Args:
@@ -52,6 +56,10 @@ class OutlierExposureTransform(nn.Module):
             min_scale: Minimum scale factor for pasted objects (default: 0.1)
             max_scale: Maximum scale factor for pasted objects (default: 0.3)
             blend_alpha: Alpha blending factor for pasted objects (default: 0.8)
+            use_weighted_scale: If True, use weighted multi-scale distribution instead of uniform (default: False)
+            scale_ranges: List of (min, max) scale ranges for each category (default: None)
+            scale_weights: List of weights for each scale range (should sum to 1.0, default: None)
+                          Example: scale_weights=[0.6, 0.3, 0.1] means 60% small, 30% medium, 10% large
         """
         super().__init__()
         self.outlier_dataset = outlier_dataset
@@ -61,6 +69,21 @@ class OutlierExposureTransform(nn.Module):
         self.min_scale = min_scale
         self.max_scale = max_scale
         self.blend_alpha = blend_alpha
+        self.use_weighted_scale = use_weighted_scale
+        
+        # Multi-scale weighted distribution
+        if use_weighted_scale:
+            if scale_ranges is None or scale_weights is None:
+                raise ValueError("scale_ranges and scale_weights must be provided when use_weighted_scale=True")
+            if len(scale_ranges) != len(scale_weights):
+                raise ValueError("scale_ranges and scale_weights must have the same length")
+            if abs(sum(scale_weights) - 1.0) > 1e-6:
+                raise ValueError(f"scale_weights must sum to 1.0 (current sum: {sum(scale_weights)})")
+            self.scale_ranges = scale_ranges
+            self.scale_weights = scale_weights
+        else:
+            self.scale_ranges = None
+            self.scale_weights = None
         
     def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -172,8 +195,11 @@ class OutlierExposureTransform(nn.Module):
             x = random.randint(0, w - 1)
             y = random.randint(0, h - 1)
             
-            # Random scale
-            scale = random.uniform(self.min_scale, self.max_scale)
+            # Select scale using weighted distribution if enabled, otherwise uniform
+            if self.use_weighted_scale:
+                scale = self._sample_weighted_scale()
+            else:
+                scale = random.uniform(self.min_scale, self.max_scale)
             
             # Paste object
             img, target = self._paste_object(
@@ -181,6 +207,26 @@ class OutlierExposureTransform(nn.Module):
             )
         
         return img, target
+    
+    def _sample_weighted_scale(self) -> float:
+        """
+        Sample scale from weighted multi-scale distribution.
+        
+        Returns:
+            Scale value sampled from the weighted distribution
+        """
+        # Select scale range based on weights
+        selected_range_idx = random.choices(
+            range(len(self.scale_ranges)),
+            weights=self.scale_weights,
+            k=1
+        )[0]
+        
+        # Sample uniformly within the selected range
+        min_scale, max_scale = self.scale_ranges[selected_range_idx]
+        scale = random.uniform(min_scale, max_scale)
+        
+        return scale
 
 
 class COCOOutlierDataset:
