@@ -191,6 +191,53 @@ class LightningModule(lightning.LightningModule):
             logging.warning(f"⚠️ Complex loss detected at batch {batch_idx}, using real part")
         
         return total_loss
+    
+    def on_before_optimizer_step(self, optimizer):
+        """
+        Hook called before optimizer step to ensure parameters and gradients are real.
+        This prevents ComplexFloat errors during optimizer step.
+        """
+        # Check all trainable parameters and gradients for complex values
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            
+            # Check if parameter is complex
+            if param.is_complex():
+                logging.warning(f"⚠️ Complex parameter detected: {name}, converting to real")
+                # Convert complex parameter to real (take real part)
+                param.data = param.data.real
+            
+            # Check if gradient exists and is complex
+            if param.grad is not None:
+                if param.grad.is_complex():
+                    logging.warning(f"⚠️ Complex gradient detected: {name}, converting to real")
+                    # Convert complex gradient to real (take real part)
+                    param.grad = param.grad.real
+                
+                # Check if gradient contains NaN/Inf
+                if not torch.isfinite(param.grad).all():
+                    logging.warning(f"⚠️ Non-finite gradient detected: {name}, zeroing out")
+                    # Zero out non-finite gradients
+                    param.grad = torch.where(
+                        torch.isfinite(param.grad),
+                        param.grad,
+                        torch.zeros_like(param.grad)
+                    )
+                
+                # Additional safety: clamp gradient to reasonable range
+                # This prevents extreme gradients that could cause numerical instability
+                torch.clamp_(param.grad, min=-100.0, max=100.0)
+            
+            # Check if parameter contains NaN/Inf
+            if not torch.isfinite(param.data).all():
+                logging.warning(f"⚠️ Non-finite parameter detected: {name}, replacing with zeros")
+                # Replace non-finite parameters with zeros (shouldn't happen, but safety)
+                param.data = torch.where(
+                    torch.isfinite(param.data),
+                    param.data,
+                    torch.zeros_like(param.data)
+                )
 
     def validation_step(self, batch, batch_idx=0):
         return self.eval_step(batch, batch_idx, "val")

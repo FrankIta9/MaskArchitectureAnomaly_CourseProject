@@ -46,7 +46,7 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "OE_FrozenBackbone_lr1e6_LogitNorm_paste15"
+      name: "OE_FrozenBackbone_lr1e6_LogitNorm_paste15_stable"
 
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
@@ -93,8 +93,8 @@ data:
   init_args:
     path: "/content/drive/MyDrive/Cityscapes"
     
-    # Batch size più grande (solo decoder trainable → meno VRAM)
-    batch_size: 6  # Era 4, ora possibile aumentare
+    # Batch size ridotto per limiti memoria VRAM
+    batch_size: 2  # Ridotto da 6 per limiti memoria
     num_workers: 8
     
     img_size: [1024, 1024]
@@ -108,10 +108,14 @@ data:
     coco_split: "val2017"
     use_coco_zip: true
     
-    # Parametri OE gentili
-    paste_probability: 0.15  # 15% batch con outliers
+    # Parametri OE ottimizzati per anomalie piccole (fs_static, RoadAnomaly)
+    # PROBLEMA: fs_static (49% AUPRC) e RoadAnomaly (74% AUPRC) hanno anomalie PICCOLE (0.5-5%)
+    # SOLUZIONE: Ridurre scala oggetti COCO per matchare anomalie piccole dei dataset di test
+    # RoadAnomaly21: anomalie 0.5%-40% immagine (molte piccole <5%)
+    # fs_static: oggetti Pascal VOC piccoli e complessi su Cityscapes
+    paste_probability: 0.15  # 15% batch con outliers (conservativo per stabilità)
     min_objects: 1
-    max_objects: 1           # Solo 1 oggetto per volta
-    min_scale: 0.08
-    max_scale: 0.15
-    coco_min_area: 1500      # Solo oggetti ben definiti
+    max_objects: 1           # Solo 1 oggetto per volta (più stabile)
+    min_scale: 0.03          # Era 0.08 → Ridotto a 3% per includere anomalie piccole (0.5-5%)
+    max_scale: 0.08          # Era 0.15 → Ridotto a 8% per matchare anomalie piccole ma ancora visibili
+    coco_min_area: 800       # Era 1500 → Ridotto a 800 per includere oggetti più piccoli (ma ancora ben definiti)
