@@ -88,6 +88,24 @@ class MaskClassificationLoss(Mask2FormerLoss):
         targets: List[dict],
         class_queries_logits: Optional[torch.Tensor] = None,
     ): 
+        # =================================================================
+        # STEP 1: Save original logits BEFORE normalization
+        # =================================================================
+        # Clone logits ONLY if both Energy Loss and Logit Norm are enabled
+        # This avoids unnecessary overhead if one is disabled
+        if (self.eim_enabled and 
+            self.logit_norm_enabled and 
+            class_queries_logits is not None):
+            # Clone for Energy Loss (will be used AFTER normalization)
+            class_queries_logits_original = class_queries_logits.clone()
+        else:
+            # If Logit Norm disabled, use same logits (no clone needed)
+            class_queries_logits_original = class_queries_logits
+
+        # =================================================================
+        # STEP 2: Apply Logit Normalization (modifies IN-PLACE)
+        # =================================================================
+        # Normalization improves calibration for matcher/standard losses
         if self.logit_norm_enabled and class_queries_logits is not None:
             logits_noobj = class_queries_logits[..., :-1]                 # [B, Q, C]
             norm = logits_noobj.norm(p=2, dim=-1, keepdim=True)  # [B, Q, 1]
@@ -101,17 +119,21 @@ class MaskClassificationLoss(Mask2FormerLoss):
         indices = self.matcher(
             masks_queries_logits=masks_queries_logits,
             mask_labels=mask_labels,
-            class_queries_logits=class_queries_logits,
+            class_queries_logits=class_queries_logits,  # Use normalized logits
             class_labels=class_labels,
         )
 
         loss_masks = self.loss_masks(masks_queries_logits, mask_labels, indices)
-        loss_classes = self.loss_labels(class_queries_logits, class_labels, indices)
+        loss_classes = self.loss_labels(class_queries_logits, class_labels, indices)  # Use normalized logits
         
-        # Add Energy-Based OOD Loss
+        # =================================================================
+        # STEP 3: Energy Loss uses ORIGINAL logits (not normalized)
+        # =================================================================
+        # Energy Loss requires original scale for correct margin values (m_in=-25.0)
+        # Logit normalization changes scale drastically, making margins invalid
         losses = {**loss_masks, **loss_classes}
-        if self.eim_enabled and class_queries_logits is not None:
-            energy_loss = self.energy_ood_loss(class_queries_logits)
+        if self.eim_enabled and class_queries_logits_original is not None:
+            energy_loss = self.energy_ood_loss(class_queries_logits_original)  # Use original logits
             losses["eim"] = energy_loss  # Keep "eim" key for compatibility with logging
 
         return losses
