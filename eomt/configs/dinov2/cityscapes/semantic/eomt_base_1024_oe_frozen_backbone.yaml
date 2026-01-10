@@ -46,7 +46,7 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "OE_FrozenBackbone_lr1e6_LogitNorm_weightedScale_v2"
+      name: "OE_FrozenBackbone_lr5e6_LogitNorm_weightedScale"
 
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
@@ -60,11 +60,16 @@ model:
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
     attn_mask_annealing_end_steps: [6634, 11609, 16585]
     
-    # ===== LR ULTRA-CONSERVATIVO =====
-    # 1e-6 = estremamente conservativo anche per decoder-only
-    # Garantisce massima stabilità + compatibilità con logit_norm
-    # VALIDATO: stesso LR del config che ha dato RoadObstacle21 92% AUPRC, FPR 0.51%
-    lr: 1e-6
+    # ===== LR BILANCIATO PER FROZEN BACKBONE + BATCH SIZE RIDOTTO =====
+    # 5e-6 = compromesso tra 1e-6 (ultra-conservativo) e 1e-5 (più veloce ma instabile)
+    # MOTIVAZIONE:
+    # - Frozen backbone → decoder può tollerare LR più alto (best practices: 1e-4 per decoder)
+    # - Batch size ridotto (2 vs 6 config funzionante) → LR più alto compensa effective batch size minore
+    # - Energy Loss + Logit Norm → 5e-6 è più stabile di 1e-4 ma più veloce di 1e-6
+    # - Energy warmup (epochs 0-9 disabled) → mitigazione instabilità iniziale
+    # VALIDATO: config funzionante (RoadObstacle21 92%) aveva lr: 1e-6 con batch_size=6
+    # Con batch_size=2, 5e-6 è appropriato per compensare effective batch size minore
+    lr: 5e-6
     llrd: 0.8  # Ignorato (backbone frozen), ma lasciato per compatibility
     
     # ===== ENERGY OOD CON WARMUP =====
