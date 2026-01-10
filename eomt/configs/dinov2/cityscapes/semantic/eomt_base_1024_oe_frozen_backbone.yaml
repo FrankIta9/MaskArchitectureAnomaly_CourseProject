@@ -61,6 +61,9 @@ trainer:
         mode: "max"  # Salva checkpoint con mIoU più alto (preserva performance in-distribution)
         save_top_k: 3  # Salva top 3 checkpoint per mIoU
         save_last: true  # Salva sempre ultimo checkpoint
+        save_weights_only: false  # IMPORTANTE: Salva anche optimizer state per permettere resume
+        # Se save_weights_only=true, non puoi riprendere il training (solo pesi modello)
+        # Se save_weights_only=false (default), puoi riprendere con --ckpt_path
         every_n_epochs: 1
   
   logger:

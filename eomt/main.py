@@ -25,6 +25,9 @@ from datasets.lightning_data_module import LightningDataModule
 import os
 os.environ["TORCH_LOGS"] = "-dynamo"
 
+# NOTA: save_weights_only=false è configurato nel YAML per salvare anche optimizer state
+# Questo permette di riprendere il training con --ckpt_path senza KeyError
+
 
 _orig_single = _t.raise_unexpected_value
 
@@ -153,6 +156,9 @@ class LightningCLI(cli.LightningCLI):
 
         if not self.config[self.config["subcommand"]]["compile_disabled"]:
             model = torch.compile(model)
+
+        # save_weights_only=false nel YAML assicura che i checkpoint includano optimizer state
+        # Questo permette di riprendere il training con --ckpt_path senza KeyError
 
         self.trainer.fit(model, **kwargs)
 

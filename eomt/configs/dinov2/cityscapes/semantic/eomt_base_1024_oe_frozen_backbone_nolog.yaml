@@ -9,6 +9,7 @@ trainer:
   precision: "16-mixed"
   
   # Checkpoint su Google Drive
+  # IMPORTANTE: save_weights_only=false per salvare anche optimizer state (permette resume)
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
@@ -18,6 +19,9 @@ trainer:
         mode: "max"
         save_top_k: 3
         save_last: true
+        save_weights_only: false  # IMPORTANTE: Salva anche optimizer state per permettere resume
+        # Se save_weights_only=true, non puoi riprendere il training (solo pesi modello)
+        # Se save_weights_only=false, puoi riprendere con --ckpt_path
         every_n_epochs: 1
   
   # Logger disabilitato (metriche solo in console/checkpoint)

@@ -965,6 +965,7 @@ class LightningModule(lightning.LightningModule):
         """
         Hook chiamato quando Lightning carica un checkpoint automaticamente (resume).
         Pulisce parametri complessi/NaN/Inf per prevenire ComplexFloat errors.
+        Gestisce anche il caso in cui il checkpoint contiene solo i pesi del modello (senza optimizer state).
         """
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
@@ -996,9 +997,26 @@ class LightningModule(lightning.LightningModule):
             if cleaned_keys > 0:
                 logging.warning(f"⚠️ Cleaned {cleaned_keys} parameters with complex/NaN/Inf values in checkpoint")
         
-        # Clean optimizer state if present (may contain corrupted values)
-        if "optimizer_states" in checkpoint:
-            # Rimuovi optimizer states corrotti per forzare re-inizializzazione
+        # Gestisci checkpoint con solo pesi modello (senza optimizer state)
+        # Se il checkpoint non ha optimizer_states, rimuoviamo le chiavi correlate per evitare errori
+        # Questo permette di riprendere il training da checkpoint con solo pesi (riparti da capo con nuovo optimizer)
+        has_optimizer_state = "optimizer_states" in checkpoint and checkpoint["optimizer_states"]
+        if not has_optimizer_state:
+            # Checkpoint contiene solo pesi del modello → rimuoviamo eventuali chiavi optimizer/scheduler per evitare errori
+            if "optimizer_states" in checkpoint:
+                logging.info("ℹ️ Checkpoint contains only model weights (no optimizer state) → will re-initialize optimizer")
+                del checkpoint["optimizer_states"]
+            if "lr_schedulers" in checkpoint:
+                del checkpoint["lr_schedulers"]
+            if "epoch" in checkpoint:
+                # Reset epoch to 0 per ripartire da capo
+                logging.info("ℹ️ Resetting epoch to 0 (checkpoint has only model weights)")
+                checkpoint["epoch"] = 0
+            if "global_step" in checkpoint:
+                checkpoint["global_step"] = 0
+            logging.info("✅ Checkpoint prepared for restart (only model weights loaded, optimizer will be re-initialized)")
+        else:
+            # Clean optimizer state if present (may contain corrupted values)
             logging.warning("⚠️ Removing optimizer states from checkpoint (may contain corrupted values)")
             del checkpoint["optimizer_states"]
             if "lr_schedulers" in checkpoint:
