@@ -46,7 +46,7 @@ trainer:
     init_args:
       resume: allow
       project: "eomt"
-      name: "OE_FrozenBackbone_lr5e5_paste15"
+      name: "OE_FrozenBackbone_lr1e6_LogitNorm_paste15"
 
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
@@ -58,21 +58,23 @@ model:
     attn_mask_annealing_start_steps: [3317, 8292, 13268]
     attn_mask_annealing_end_steps: [6634, 11609, 16585]
     
-    # ===== LR PIÙ ALTO per decoder-only =====
-    # 5e-5 = 25x più alto di 2e-6 (ultraconservativo full model)
-    # Safe perché solo decoder cambia, backbone preservato
-    lr: 5e-5
+    # ===== LR ULTRA-CONSERVATIVO =====
+    # 1e-6 = estremamente conservativo anche per decoder-only
+    # Garantisce massima stabilità + compatibilità con logit_norm
+    lr: 1e-6
     llrd: 0.8  # Ignorato (backbone frozen), ma lasciato per compatibility
     
     # ===== ENERGY OOD CON WARMUP =====
-    # Può essere più aggressivo perché backbone è stabile
+    # Conservativo per compatibilità con logit_norm
     energy_ood_enabled: true
-    energy_ood_max_weight: 0.005  # Leggermente più alto di 0.002
-    energy_warmup_epochs: 5  # Warmup più breve (era 15)
+    energy_ood_max_weight: 0.002  # Conservative (come ultraconservative)
+    energy_warmup_epochs: 10  # Warmup medio (era 5)
     max_epochs: 30
     
-    # Logit Normalization disabled di default
-    logit_norm_enabled: false
+    # ===== LOGIT NORMALIZATION ENABLED =====
+    # Normalizza logits per migliorare calibrazione anomaly scores
+    # Funzionava bene nei test precedenti
+    logit_norm_enabled: true
     logit_norm_tau: 0.04
     logit_norm_eps: 1e-6
     
