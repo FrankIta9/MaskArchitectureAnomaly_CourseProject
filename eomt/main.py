@@ -116,8 +116,8 @@ class LightningCLI(cli.LightningCLI):
 
     def add_arguments_to_parser(self, parser):
         parser.add_argument("--compile_disabled", action="store_true")
-        # Add ckpt_path argument for resume training
-        parser.add_argument("--ckpt_path", type=str, default=None, help="Path to checkpoint file to resume training from")
+        # Use --resume_from instead of --ckpt_path to avoid conflict with Trainer.fit(ckpt_path=...)
+        parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint file to resume training from (alternative to Trainer.ckpt_path)")
 
         parser.link_arguments(
             "data.init_args.num_classes", "model.init_args.num_classes"
@@ -161,28 +161,27 @@ class LightningCLI(cli.LightningCLI):
             model = torch.compile(model)
 
         # save_weights_only=false nel YAML assicura che i checkpoint includano optimizer state
-        # Questo permette di riprendere il training con --ckpt_path senza KeyError
+        # Questo permette di riprendere il training con --resume_from senza KeyError
         
-        # Get ckpt_path from command line argument if provided (for resume training)
+        # Get resume_from checkpoint path from command line argument if provided
         ckpt_path = None
-        # Try multiple ways to access ckpt_path argument
         try:
-            # Method 1: Access from parsed config (LightningCLI standard)
+            # Access --resume_from argument from parsed config
             if hasattr(self, "config") and isinstance(self.config, dict):
                 subcommand = self.config.get("subcommand", "fit")
                 subcommand_config = self.config.get(subcommand, {})
                 if isinstance(subcommand_config, dict):
-                    ckpt_path = subcommand_config.get("ckpt_path")
+                    ckpt_path = subcommand_config.get("resume_from")
                 if ckpt_path is None:
-                    ckpt_path = self.config.get("ckpt_path")
+                    ckpt_path = self.config.get("resume_from")
             
-            # Method 2: Parse from sys.argv directly (fallback)
-            if ckpt_path is None and "--ckpt_path" in sys.argv:
-                idx = sys.argv.index("--ckpt_path")
+            # Fallback: Parse from sys.argv directly
+            if ckpt_path is None and "--resume_from" in sys.argv:
+                idx = sys.argv.index("--resume_from")
                 if idx + 1 < len(sys.argv):
                     ckpt_path = sys.argv[idx + 1]
         except (AttributeError, KeyError, TypeError, ValueError, IndexError) as e:
-            logging.debug(f"Could not access ckpt_path: {e}")
+            logging.debug(f"Could not access resume_from: {e}")
         
         if ckpt_path:
             logging.info(f"📂 Resuming training from checkpoint: {ckpt_path}")
