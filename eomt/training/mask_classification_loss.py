@@ -41,9 +41,9 @@ class MaskClassificationLoss(Mask2FormerLoss):
         max_epochs: int = 50,  # Total training epochs
     ):
         nn.Module.__init__(self)
-        self.logit_norm_enabled = logit_norm_enabled,
-        self.logit_norm_tau = logit_norm_tau,
-        self.logit_norm_eps = logit_norm_eps,
+        self.logit_norm_enabled = logit_norm_enabled
+        self.logit_norm_tau = logit_norm_tau
+        self.logit_norm_eps = logit_norm_eps
         self.num_points = num_points
         self.oversample_ratio = oversample_ratio
         self.importance_sample_ratio = importance_sample_ratio
