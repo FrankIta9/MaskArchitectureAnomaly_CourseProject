@@ -184,9 +184,9 @@ class MaskClassificationSemantic(LightningModule):
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")
         
-        # OOD Validation: Lightweight validation on OOD datasets
-        if (self.ood_lostfound_path or self.ood_fsstatic_path) and not self.trainer.sanity_checking:
-            self._validate_ood_datasets()
+        # OOD Validation DISABLED: Skip OOD validation (LostFound/fs_static AUPRC computation)
+        # if (self.ood_lostfound_path or self.ood_fsstatic_path) and not self.trainer.sanity_checking:
+        #     self._validate_ood_datasets()
     
     def _validate_ood_datasets(self):
         """
