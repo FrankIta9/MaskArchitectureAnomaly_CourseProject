@@ -307,11 +307,11 @@ class MaskClassificationSemantic(LightningModule):
                     try:
                         # Load and preprocess image
                         img_pil = Image.open(img_path).convert("RGB")
-                        img_tensor = input_transform(img_pil).float().to(device).unsqueeze(0)  # [1, 3, H, W]
-                        
+                        img_tensor = input_transform(img_pil).float().to(device)  # [3, H, W] - NO batch dimension
+
                         # Forward pass (use windowing for large images)
                         img_sizes = [img_tensor.shape[-2:]]
-                        crops, origins = self.window_imgs_semantic([img_tensor])
+                        crops, origins = self.window_imgs_semantic([img_tensor])  # Expects [3, H, W], not [1, 3, H, W]
                         mask_logits_per_layer, class_logits_per_layer = self(crops)
                         
                         # Use last layer output
