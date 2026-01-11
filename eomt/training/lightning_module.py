@@ -83,6 +83,16 @@ class LightningModule(lightning.LightningModule):
         self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
 
         self.strict_loading = False
+        
+        # Task 1: Counter for printing ood_mask statistics for first 3 batches
+        self._ood_mask_print_count = 0
+        
+        # Task 4: Buffer for accumulating energy statistics to compute real margins
+        # Accumulate energy values during first N steps (default: 5000)
+        self._energy_margin_calculation_steps = 5000
+        self._energy_id_buffer = []  # List to accumulate E_id values
+        self._energy_ood_buffer = []  # List to accumulate E_ood values
+        self._energy_margins_computed = False  # Flag to track if margins have been computed
 
         if delta_weights and ckpt_path:
             logging.info("Delta weights mode")
@@ -325,6 +335,67 @@ class LightningModule(lightning.LightningModule):
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
+        
+        # Task 1: Print ood_mask for first 3 batches + overlay check
+        if self._ood_mask_print_count < 3:
+            # Check if any target has ood_mask
+            for i, target in enumerate(targets):
+                if "ood_mask" in target:
+                    ood_mask = target["ood_mask"]
+                    h, w = ood_mask.shape
+                    
+                    # Compute statistics
+                    num_ood_pixels = (ood_mask == 1).sum().item()
+                    num_id_pixels = (ood_mask == 0).sum().item()
+                    num_ignore_pixels = (ood_mask == 255).sum().item()
+                    total_pixels = h * w
+                    ood_percentage = (num_ood_pixels / total_pixels) * 100
+                    unique_values = torch.unique(ood_mask).tolist()
+                    
+                    logging.info(
+                        f"📊 Task 1 - Batch {batch_idx}, Sample {i}: ood_mask - "
+                        f"Shape: {h}x{w}, "
+                        f"Unique values: {unique_values}, "
+                        f"OOD pixels (1): {num_ood_pixels} ({ood_percentage:.2f}%), "
+                        f"ID pixels (0): {num_id_pixels}, "
+                        f"Ignore pixels (255): {num_ignore_pixels}"
+                    )
+                    
+                    # PUNTO CRITICO #1: Overlay check - verify ood_mask alignment
+                    # Create overlay visualization to verify ood_mask is aligned with image
+                    try:
+                        img_sample = imgs[i]  # [3, H, W] in range [0, 255]
+                        # Convert image to numpy for visualization
+                        img_np = img_sample.permute(1, 2, 0).cpu().numpy().astype(np.uint8)  # [H, W, 3]
+                        ood_mask_np = ood_mask.cpu().numpy()  # [H, W]
+                        
+                        # Create overlay: ood_mask in red over image
+                        overlay = img_np.copy()
+                        # Create red mask for OOD pixels (value == 1)
+                        ood_region = (ood_mask_np == 1)
+                        overlay[ood_region] = np.clip(
+                            overlay[ood_region] * 0.5 + np.array([255, 0, 0]) * 0.5, 
+                            0, 255
+                        ).astype(np.uint8)
+                        
+                        # Log overlay as wandb image if logger is available
+                        if hasattr(self, 'logger') and self.logger is not None:
+                            try:
+                                from PIL import Image as PILImage
+                                overlay_pil = PILImage.fromarray(overlay)
+                                # Log to wandb
+                                self.logger.experiment.log({
+                                    f"check/ood_mask_overlay_batch{batch_idx}_sample{i}": [wandb.Image(overlay_pil, caption=f"OOD mask overlay (red=OOD, batch {batch_idx}, sample {i})")]
+                                })
+                                logging.info(f"✅ Task 1: Logged ood_mask overlay for batch {batch_idx}, sample {i}")
+                            except Exception as e:
+                                logging.warning(f"⚠️ Task 1: Failed to log overlay: {e}")
+                    except Exception as e:
+                        logging.warning(f"⚠️ Task 1: Failed to create overlay check: {e}")
+                    
+                    self._ood_mask_print_count += 1
+                    if self._ood_mask_print_count >= 3:
+                        break
 
         mask_logits_per_block, class_logits_per_block = self(imgs)
 
@@ -340,6 +411,96 @@ class LightningModule(lightning.LightningModule):
             block_postfix = self.block_postfix(i)
             losses = {f"{key}{block_postfix}": value for key, value in losses.items()}
             losses_all_blocks |= losses
+
+        # Task 2: Log energy separated ID vs OOD
+        # Use the last layer output for energy calculation
+        if mask_logits_per_block and class_logits_per_block:
+            mask_logits = mask_logits_per_block[-1]  # Last layer [B, Q, H, W]
+            class_logits = class_logits_per_block[-1]  # Last layer [B, Q, C+1]
+            
+            # Check if any target has ood_mask (only for semantic segmentation with OE)
+            if targets and "ood_mask" in targets[0]:
+                # Interpolate mask_logits to img_size (same as in eval_step)
+                mask_logits_interp = interpolate(mask_logits, self.img_size, mode="bilinear", align_corners=False)  # [B, Q, H, W]
+                
+                # Calculate pixel_logits = to_per_pixel_logits_semantic(mask_logits, class_logits)
+                pixel_logits = self.to_per_pixel_logits_semantic(mask_logits_interp, class_logits)  # [B, C, H, W]
+                
+                # Calculate energy_map = -T*logsumexp(pixel_logits/T)
+                # Use temperature T = 1.0 (same as energy loss)
+                T = 1.0
+                pixel_logits_scaled = pixel_logits / T  # [B, C, H, W]
+                # Clamp for numerical stability
+                pixel_logits_scaled = torch.clamp(pixel_logits_scaled, min=-50.0, max=50.0)
+                energy_map = -T * torch.logsumexp(pixel_logits_scaled, dim=1)  # [B, H, W]
+                
+                # Process each sample in the batch
+                for batch_idx_internal, target in enumerate(targets):
+                    if "ood_mask" in target:
+                        ood_mask = target["ood_mask"]  # [H, W]
+                        energy = energy_map[batch_idx_internal]  # [H, W]
+                        
+                        # Filter energy by ood_mask: 0 = ID, 1 = OOD, 255 = ignore
+                        # Exclude ignore pixels (255)
+                        valid_mask = ood_mask != 255
+                        energy_valid = energy[valid_mask]
+                        ood_mask_valid = ood_mask[valid_mask]
+                        
+                        if energy_valid.numel() > 0:
+                            # Separate energy for ID and OOD
+                            energy_id = energy_valid[ood_mask_valid == 0]
+                            energy_ood = energy_valid[ood_mask_valid == 1]
+                            
+                            # Log mean energies
+                            if energy_id.numel() > 0:
+                                energy_id_mean = energy_id.mean().item()
+                                energy_id_std = energy_id.std().item()
+                                self.log("dbg/energy_id_mean", energy_id_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                self.log("dbg/energy_id_std", energy_id_std, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                
+                                # Task 4: Accumulate energy values for margin calculation
+                                current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_id_buffer)
+                                if not self._energy_margins_computed and current_step < self._energy_margin_calculation_steps:
+                                    # Accumulate individual values (sample to avoid memory issues)
+                                    energy_id_values = energy_id.detach().cpu().numpy()
+                                    # Sample up to 1000 values per batch to avoid memory explosion
+                                    if len(energy_id_values) > 1000:
+                                        indices = np.random.choice(len(energy_id_values), 1000, replace=False)
+                                        energy_id_values = energy_id_values[indices]
+                                    self._energy_id_buffer.extend(energy_id_values.tolist())
+                            
+                            if energy_ood.numel() > 0:
+                                energy_ood_mean = energy_ood.mean().item()
+                                energy_ood_std = energy_ood.std().item()
+                                self.log("dbg/energy_ood_mean", energy_ood_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                self.log("dbg/energy_ood_std", energy_ood_std, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                
+                                # Task 4: Accumulate energy values for margin calculation
+                                current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_ood_buffer)
+                                if not self._energy_margins_computed and current_step < self._energy_margin_calculation_steps:
+                                    # Accumulate individual values (sample to avoid memory issues)
+                                    energy_ood_values = energy_ood.detach().cpu().numpy()
+                                    # Sample up to 1000 values per batch to avoid memory explosion
+                                    if len(energy_ood_values) > 1000:
+                                        indices = np.random.choice(len(energy_ood_values), 1000, replace=False)
+                                        energy_ood_values = energy_ood_values[indices]
+                                    self._energy_ood_buffer.extend(energy_ood_values.tolist())
+                            
+                            # Log energy separation
+                            if energy_id.numel() > 0 and energy_ood.numel() > 0:
+                                energy_sep = energy_ood.mean() - energy_id.mean()
+                                self.log("dbg/energy_sep", energy_sep, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                            
+                            # Task 4: Compute margins after collecting enough statistics
+                            current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_id_buffer)
+                            if (not self._energy_margins_computed and 
+                                current_step >= self._energy_margin_calculation_steps and
+                                len(self._energy_id_buffer) > 0 and 
+                                len(self._energy_ood_buffer) > 0):
+                                self._compute_and_update_margins()
+                        
+                        # Only process first sample in batch (avoid duplicate logs)
+                        break
 
         total_loss = self.criterion.loss_total(losses_all_blocks, self.log)
         
@@ -357,6 +518,81 @@ class LightningModule(lightning.LightningModule):
             logging.warning(f"⚠️ Complex loss detected at batch {batch_idx}, using real part")
         
         return total_loss
+    
+    def _compute_and_update_margins(self):
+        """
+        Task 4: Compute real margins from accumulated energy distributions.
+        
+        Compute margins from percentiles:
+        - m_in ~ P90(E_id) or mean_id + 1*std_id
+        - m_out ~ P10(E_ood) or mean_ood - 1*std_ood
+        """
+        if len(self._energy_id_buffer) == 0 or len(self._energy_ood_buffer) == 0:
+            logging.warning("⚠️ Task 4: Cannot compute margins - empty energy buffers")
+            return
+        
+        # Convert to numpy arrays (numpy already imported at top of file)
+        energy_id_array = np.array(self._energy_id_buffer)
+        energy_ood_array = np.array(self._energy_ood_buffer)
+        
+        # Compute statistics
+        energy_id_mean = float(np.mean(energy_id_array))
+        energy_id_std = float(np.std(energy_id_array))
+        energy_id_p90 = float(np.percentile(energy_id_array, 90))
+        energy_id_p50 = float(np.percentile(energy_id_array, 50))
+        energy_id_p10 = float(np.percentile(energy_id_array, 10))
+        
+        energy_ood_mean = float(np.mean(energy_ood_array))
+        energy_ood_std = float(np.std(energy_ood_array))
+        energy_ood_p90 = float(np.percentile(energy_ood_array, 90))
+        energy_ood_p50 = float(np.percentile(energy_ood_array, 50))
+        energy_ood_p10 = float(np.percentile(energy_ood_array, 10))
+        
+        # Log statistics
+        current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
+        logging.info(
+            f"📊 Task 4 - Energy Statistics (step {current_step}):\n"
+            f"  E_id: mean={energy_id_mean:.2f}, std={energy_id_std:.2f}, "
+            f"P10={energy_id_p10:.2f}, P50={energy_id_p50:.2f}, P90={energy_id_p90:.2f}\n"
+            f"  E_ood: mean={energy_ood_mean:.2f}, std={energy_ood_std:.2f}, "
+            f"P10={energy_ood_p10:.2f}, P50={energy_ood_p50:.2f}, P90={energy_ood_p90:.2f}"
+        )
+        
+        # Compute margins using percentiles (preferred) or mean+std (quick)
+        # Option 1: Use percentiles (preferred)
+        m_in_candidate = energy_id_p90  # P90 of ID energy
+        m_out_candidate = energy_ood_p10  # P10 of OOD energy
+        
+        # Option 2: Use mean + 1*std (alternative)
+        # m_in_candidate = energy_id_mean + energy_id_std
+        # m_out_candidate = energy_ood_mean - energy_ood_std
+        
+        # Ensure m_out > m_in
+        if m_out_candidate <= m_in_candidate:
+            # If separation is not clear, use a small gap
+            gap = max(1.0, (energy_ood_mean - energy_id_mean) * 0.1)
+            m_out_candidate = m_in_candidate + gap
+            logging.warning(
+                f"⚠️ Task 4: Energy separation not clear (m_out <= m_in), "
+                f"using gap={gap:.2f}. This indicates the model is not separating ID/OOD yet."
+            )
+        
+        # Update margins in energy loss if available
+        if hasattr(self, 'criterion') and hasattr(self.criterion, 'energy_ood_loss'):
+            try:
+                self.criterion.energy_ood_loss.base_loss.update_margins(m_in_candidate, m_out_candidate)
+                logging.info(
+                    f"✅ Task 4: Updated energy margins - m_in={m_in_candidate:.2f}, m_out={m_out_candidate:.2f}"
+                )
+                # Mark as computed
+                self._energy_margins_computed = True
+                # Clear buffers to save memory
+                self._energy_id_buffer.clear()
+                self._energy_ood_buffer.clear()
+            except Exception as e:
+                logging.warning(f"⚠️ Task 4: Failed to update margins: {e}")
+        else:
+            logging.warning("⚠️ Task 4: Cannot update margins - energy_ood_loss not available")
     
     def on_before_optimizer_step(self, optimizer):
         """

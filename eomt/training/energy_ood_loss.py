@@ -3,6 +3,9 @@
 # Based on: "Energy-based Out-of-distribution Detection" (NeurIPS 2020)
 # Adapted for Mask2Former-style segmentation with Outlier Exposure
 # WITH WARMUP SCHEDULER to avoid conflict with OE in early training
+# 
+# Task 3: Fixed to use margin-based loss (L_id = ReLU(E_id - m_in), L_ood = ReLU(m_out - E_ood))
+# Task 6: Option A - Uses per-pixel semantic logits [B,C,H,W] aligned with inference
 # ---------------------------------------------------------------
 
 import torch
@@ -17,24 +20,25 @@ class EnergyOODLoss(nn.Module):
     Energy-Based Out-of-Distribution Detection Loss.
     
     This loss encourages the model to produce:
-    - LOW energy scores for in-distribution (ID) classes
-    - HIGH energy scores for out-of-distribution (OOD) samples
+    - LOW energy scores for in-distribution (ID) pixels
+    - HIGH energy scores for out-of-distribution (OOD) pixels
     
-    Energy Score: E(x) = -log(sum(exp(logits)))
+    Energy Score: E(x) = -T * log(sum(exp(logits / T)))
     
-    For segmentation with Outlier Exposure:
-    - ID queries (matched to ground truth): minimize energy
-    - Unmatched queries (potentially OOD): can have higher energy
+    Task 3: Margin-based loss:
+    - L_id = ReLU(E_id - m_in) (ID must be below m_in)
+    - L_ood = ReLU(m_out - E_ood) (OOD must be above m_out)
+    - Total: L = L_id + L_ood
     
-    This loss is computed on class logits and encourages better
-    separation between ID and OOD predictions without conflicting
-    with Outlier Exposure (unlike isotropy-based approaches).
+    Task 6: Uses per-pixel semantic logits [B,C,H,W] (Option A)
+    - Aligns training (loss) with inference (anomaly map MSP/MaxLogit)
     
     Args:
         temperature: Temperature scaling for energy computation (default: 1.0)
         weight: Weight for the energy regularization term (default: 0.05)
         m_in: Margin for in-distribution samples (default: -25.0)
         m_out: Margin for out-of-distribution samples (default: -7.0)
+        Note: m_out must be > m_in (OOD energy should be higher)
     
     References:
         Liu et al., "Energy-based Out-of-distribution Detection", NeurIPS 2020
@@ -53,59 +57,64 @@ class EnergyOODLoss(nn.Module):
         self.m_in = m_in  # Margin for ID samples (should have energy < m_in)
         self.m_out = m_out  # Margin for OOD samples (should have energy > m_out)
         
-    def compute_energy(self, logits: torch.Tensor) -> torch.Tensor:
+        # Validate that m_out > m_in
+        if m_out <= m_in:
+            raise ValueError(f"m_out ({m_out}) must be greater than m_in ({m_in}) for proper energy separation")
+    
+    def update_margins(self, m_in: float, m_out: float):
         """
-        Compute energy score for given logits.
+        Update margins dynamically (Task 4: find real margins from distributions).
+        
+        Args:
+            m_in: New margin for ID samples
+            m_out: New margin for OOD samples
+        """
+        if m_out <= m_in:
+            raise ValueError(f"m_out ({m_out}) must be greater than m_in ({m_in}) for proper energy separation")
+        self.m_in = m_in
+        self.m_out = m_out
+    
+    def compute_energy_from_pixel_logits(self, pixel_logits: torch.Tensor) -> torch.Tensor:
+        """
+        Compute energy score from per-pixel semantic logits.
         
         Energy: E(x) = -T * log(sum(exp(logits / T)))
         
         Args:
-            logits: Class logits tensor (batch, num_queries, num_classes + 1)
+            pixel_logits: Per-pixel logits tensor [B, C, H, W]
             
         Returns:
-            Energy scores (batch, num_queries)
+            Energy scores [B, H, W]
         """
         # Safety check: ensure logits are real (not complex) and finite
-        if logits.is_complex():
-            # Convert complex to real (take real part) - should not happen
-            logits = logits.real
+        if pixel_logits.is_complex():
+            pixel_logits = pixel_logits.real
         
-        if not torch.isfinite(logits).all():
+        if not torch.isfinite(pixel_logits).all():
             # If logits contain NaN/Inf, return safe default energy values
-            return torch.full((logits.shape[0], logits.shape[1]), -25.0, device=logits.device, dtype=logits.dtype)
+            h, w = pixel_logits.shape[-2:]
+            return torch.full((pixel_logits.shape[0], h, w), -25.0, device=pixel_logits.device, dtype=pixel_logits.dtype)
         
         # Force float32 for energy/softmax/logsumexp computations (better numerical stability)
-        # Scale logits by temperature (cast to float32 before computation)
-        logits_f32 = logits.float() if logits.dtype != torch.float32 else logits
-        scaled_logits = logits_f32 / self.temperature
-        
-        # Exclude "no object" class (last class) for ID energy
-        # We only consider ID classes for energy computation
-        id_logits = scaled_logits[..., :-1]  # Remove "no object" class
-        
-        # Safety check: ensure id_logits has valid shape and values
-        if id_logits.numel() == 0:
-            # Return zeros if no ID logits (shouldn't happen, but safety check)
-            return torch.zeros(logits.shape[0], logits.shape[1], device=logits.device, dtype=logits.dtype)
+        pixel_logits_f32 = pixel_logits.float() if pixel_logits.dtype != torch.float32 else pixel_logits
+        scaled_logits = pixel_logits_f32 / self.temperature  # [B, C, H, W]
         
         # Clamp logits to reasonable range to avoid numerical overflow/underflow
-        # Large values in exp can cause Inf, which then becomes NaN in log
-        # Very negative values can cause underflow, but logsumexp handles this
-        id_logits = torch.clamp(id_logits, min=-50.0, max=50.0)
+        scaled_logits = torch.clamp(scaled_logits, min=-50.0, max=50.0)
         
-        # Ensure id_logits is real and finite before logsumexp
-        if id_logits.is_complex():
-            id_logits = id_logits.real
-        if not torch.isfinite(id_logits).all():
-            id_logits = torch.where(torch.isfinite(id_logits), id_logits, torch.zeros_like(id_logits))
+        # Ensure logits are real and finite before logsumexp
+        if scaled_logits.is_complex():
+            scaled_logits = scaled_logits.real
+        if not torch.isfinite(scaled_logits).all():
+            scaled_logits = torch.where(torch.isfinite(scaled_logits), scaled_logits, torch.zeros_like(scaled_logits))
         
-        # Compute logsumexp for numerical stability (ensure float32)
-        # Energy = -T * logsumexp(logits / T)
-        # logsumexp is numerically stable and handles underflow/overflow
-        energy = -self.temperature * torch.logsumexp(id_logits, dim=-1)
+        # Compute logsumexp for numerical stability
+        # Energy = -T * logsumexp(logits / T) along class dimension
+        energy = -self.temperature * torch.logsumexp(scaled_logits, dim=1)  # [B, H, W]
+        
         # Convert back to original dtype if needed
-        if logits.dtype != torch.float32:
-            energy = energy.to(logits.dtype)
+        if pixel_logits.dtype != torch.float32:
+            energy = energy.to(pixel_logits.dtype)
         
         # Ensure energy is real (not complex) - should always be true
         if energy.is_complex():
@@ -123,69 +132,172 @@ class EnergyOODLoss(nn.Module):
         
         return energy
     
-    def forward(
-        self,
-        class_logits: torch.Tensor,
-        target_labels: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def compute_energy(self, logits: torch.Tensor) -> torch.Tensor:
         """
-        Compute Energy-based OOD regularization loss.
+        Compute energy score for given query-level logits (legacy method for compatibility).
         
-        This is a REGULARIZATION term that encourages:
-        - Lower energy for predictions (assuming most are ID)
-        - Energy-based separation for better OOD detection at inference
-        
-        For Outlier Exposure training:
-        - The model sees both ID (Cityscapes) and OOD (COCO) samples
-        - OE naturally creates high energy for OOD through standard losses
-        - This loss adds gentle regularization to improve separation
+        Energy: E(x) = -T * log(sum(exp(logits / T)))
         
         Args:
-            class_logits: Class logits (batch_size, num_queries, num_classes + 1)
-            target_labels: Optional target labels (not used in unsupervised OE)
+            logits: Class logits tensor (batch, num_queries, num_classes + 1)
+            
+        Returns:
+            Energy scores (batch, num_queries)
+        """
+        # Safety check: ensure logits are real (not complex) and finite
+        if logits.is_complex():
+            logits = logits.real
+        
+        if not torch.isfinite(logits).all():
+            return torch.full((logits.shape[0], logits.shape[1]), -25.0, device=logits.device, dtype=logits.dtype)
+        
+        logits_f32 = logits.float() if logits.dtype != torch.float32 else logits
+        scaled_logits = logits_f32 / self.temperature
+        
+        # Exclude "no object" class (last class) for ID energy
+        id_logits = scaled_logits[..., :-1]  # Remove "no object" class
+        
+        if id_logits.numel() == 0:
+            return torch.zeros(logits.shape[0], logits.shape[1], device=logits.device, dtype=logits.dtype)
+        
+        id_logits = torch.clamp(id_logits, min=-50.0, max=50.0)
+        
+        if id_logits.is_complex():
+            id_logits = id_logits.real
+        if not torch.isfinite(id_logits).all():
+            id_logits = torch.where(torch.isfinite(id_logits), id_logits, torch.zeros_like(id_logits))
+        
+        energy = -self.temperature * torch.logsumexp(id_logits, dim=-1)
+        if logits.dtype != torch.float32:
+            energy = energy.to(logits.dtype)
+        
+        if energy.is_complex():
+            energy = energy.real
+        
+        energy = torch.clamp(energy, min=-100.0, max=100.0)
+        energy = torch.where(torch.isfinite(energy), energy, torch.full_like(energy, -25.0))
+        
+        if not energy.dtype.is_floating_point:
+            energy = energy.float()
+        
+        return energy
+    
+    def forward(
+        self,
+        pixel_logits: Optional[torch.Tensor] = None,
+        ood_mask: Optional[torch.Tensor] = None,
+        class_logits: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Compute Energy-based OOD margin loss.
+        
+        Task 3: Margin-based loss:
+        - L_id = ReLU(E_id - m_in) (penalize ID energy above m_in)
+        - L_ood = ReLU(m_out - E_ood) (penalize OOD energy below m_out)
+        - Total: L = L_id + L_ood
+        
+        Task 6: Uses per-pixel semantic logits [B,C,H,W] (Option A - preferred)
+        - Aligns training with inference
+        
+        Args:
+            pixel_logits: Per-pixel logits [B, C, H, W] (preferred - Task 6 Option A)
+            ood_mask: OOD mask [B, H, W] with values: 0=ID, 1=OOD, 255=ignore (required if pixel_logits provided)
+            class_logits: Query-level class logits [B, Q, C+1] (legacy - for backward compatibility)
             
         Returns:
             Energy regularization loss
         """
-        # Safety check: ensure logits are finite
-        if not torch.isfinite(class_logits).all():
-            # If logits contain NaN/Inf, return zero loss to avoid crashing
-            return torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
+        # Task 6: Option A - Use per-pixel logits if available (preferred)
+        if pixel_logits is not None and ood_mask is not None:
+            # Safety check: ensure logits are finite
+            if not torch.isfinite(pixel_logits).all():
+                return torch.tensor(0.0, device=pixel_logits.device, dtype=pixel_logits.dtype, requires_grad=True)
+            
+            # Compute energy map from per-pixel logits
+            energy_map = self.compute_energy_from_pixel_logits(pixel_logits)  # [B, H, W]
+            
+            # Safety check: ensure energy is finite
+            if not torch.isfinite(energy_map).all():
+                energy_map = torch.where(torch.isfinite(energy_map), energy_map, torch.full_like(energy_map, -25.0))
+            
+            # Task 3: Margin-based loss with ID/OOD separation
+            batch_size = energy_map.shape[0]
+            loss_id_list = []
+            loss_ood_list = []
+            
+            for b in range(batch_size):
+                energy_b = energy_map[b]  # [H, W]
+                ood_mask_b = ood_mask[b]  # [H, W]
+                
+                # Filter out ignore pixels (255)
+                valid_mask = ood_mask_b != 255
+                if not valid_mask.any():
+                    continue  # Skip if no valid pixels
+                
+                energy_valid = energy_b[valid_mask]  # [N]
+                ood_mask_valid = ood_mask_b[valid_mask]  # [N]
+                
+                # Separate ID and OOD
+                energy_id = energy_valid[ood_mask_valid == 0]  # ID pixels
+                energy_ood = energy_valid[ood_mask_valid == 1]  # OOD pixels
+                
+                # Task 3: Margin-based loss
+                # L_id = ReLU(E_id - m_in): penalize if ID energy > m_in
+                if energy_id.numel() > 0:
+                    loss_id = F.relu(energy_id - self.m_in).mean()
+                    if torch.isfinite(loss_id):
+                        loss_id_list.append(loss_id)
+                
+                # L_ood = ReLU(m_out - E_ood): penalize if OOD energy < m_out
+                if energy_ood.numel() > 0:
+                    loss_ood = F.relu(self.m_out - energy_ood).mean()
+                    if torch.isfinite(loss_ood):
+                        loss_ood_list.append(loss_ood)
+            
+            # Combine losses: L = L_id + L_ood
+            if loss_id_list and loss_ood_list:
+                loss = torch.stack(loss_id_list).mean() + torch.stack(loss_ood_list).mean()
+            elif loss_id_list:
+                loss = torch.stack(loss_id_list).mean()
+            elif loss_ood_list:
+                loss = torch.stack(loss_ood_list).mean()
+            else:
+                # No valid pixels, return zero loss
+                device = pixel_logits.device
+                dtype = pixel_logits.dtype
+                loss = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
+            
+            # Ensure loss is finite (safety check)
+            if not torch.isfinite(loss):
+                loss = torch.tensor(0.0, device=loss.device, dtype=loss.dtype, requires_grad=True)
+            
+            return loss * self.weight
         
-        # Compute energy scores for all queries
-        energy = self.compute_energy(class_logits)  # (batch, num_queries)
+        # Legacy: Use query-level logits (for backward compatibility)
+        elif class_logits is not None:
+            if not torch.isfinite(class_logits).all():
+                return torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
+            
+            energy = self.compute_energy(class_logits)  # (batch, num_queries)
+            
+            if not torch.isfinite(energy).all():
+                energy = torch.where(torch.isfinite(energy), energy, torch.full_like(energy, -25.0))
+            
+            # Legacy: Simple energy regularization (encourage low energy)
+            # Note: This doesn't properly separate ID/OOD, but kept for compatibility
+            loss = F.relu(energy - self.m_in).mean()
+            
+            if not torch.isfinite(loss):
+                loss = torch.tensor(0.0, device=loss.device, dtype=loss.dtype, requires_grad=True)
+            
+            return loss * self.weight
         
-        # Safety check: ensure energy is finite before computing loss
-        if not torch.isfinite(energy).all():
-            # Replace NaN/Inf with safe values
-            energy = torch.where(torch.isfinite(energy), energy, torch.full_like(energy, -25.0))
-        
-        # Energy-based regularization:
-        # Encourage low energy overall (ID-like behavior)
-        # The standard Mask2Former loss + OE will naturally create
-        # high energy for outliers, so we just regularize towards
-        # reasonable energy values
-        
-        # Option 1: Simple energy regularization (encourage low energy)
-        # This helps the model learn to produce low energy for ID samples
-        # OE will naturally push energy higher for outliers via classification loss
-        
-        # Use hinge loss: max(0, energy - m_in)
-        # Penalize if energy is too high (> m_in threshold)
-        loss = F.relu(energy - self.m_in).mean()
-        
-        # Ensure loss is finite (safety check)
-        if not torch.isfinite(loss):
-            loss = torch.tensor(0.0, device=loss.device, dtype=loss.dtype, requires_grad=True)
-        
-        # Alternative: Could use MSE to target specific energy value
-        # loss = F.mse_loss(energy, torch.full_like(energy, self.m_in))
-        
-        return loss * self.weight
+        else:
+            raise ValueError("Either (pixel_logits, ood_mask) or class_logits must be provided")
     
     def get_energy_stats(self, class_logits: torch.Tensor) -> dict:
         """
-        Get energy statistics for monitoring/debugging.
+        Get energy statistics for monitoring/debugging (legacy method).
         
         Args:
             class_logits: Class logits (batch_size, num_queries, num_classes + 1)
@@ -196,17 +308,14 @@ class EnergyOODLoss(nn.Module):
         with torch.no_grad():
             energy = self.compute_energy(class_logits)
             
-            # Ensure energy is finite before computing stats
             if not torch.isfinite(energy).all():
                 energy = torch.where(torch.isfinite(energy), energy, torch.full_like(energy, -25.0))
             
-            # Compute statistics with safety checks
             energy_mean = energy.mean().item() if energy.numel() > 0 else -25.0
             energy_std = energy.std().item() if energy.numel() > 1 and torch.isfinite(energy.std()) else 0.0
             energy_min = energy.min().item() if energy.numel() > 0 and torch.isfinite(energy.min()) else -25.0
             energy_max = energy.max().item() if energy.numel() > 0 and torch.isfinite(energy.max()) else -25.0
             
-            # Ensure all stats are finite (no NaN/Inf)
             energy_mean = energy_mean if isinstance(energy_mean, (int, float)) and (not math.isnan(energy_mean) and not math.isinf(energy_mean)) else -25.0
             energy_std = energy_std if isinstance(energy_std, (int, float)) and (not math.isnan(energy_std) and not math.isinf(energy_std)) else 0.0
             energy_min = energy_min if isinstance(energy_min, (int, float)) and (not math.isnan(energy_min) and not math.isinf(energy_min)) else -25.0
@@ -233,16 +342,17 @@ class EnergyOODLossWithWarmup(nn.Module):
       → Model already knows outlier="no object", now refines energy separation
       → Cosine warmup: 0 → max_weight
     
-    This approach follows best practices:
-    1. Let OE teach outlier detection first (via standard losses)
-    2. Then add energy regularization to refine confidence calibration
-    3. Avoids early training instability from conflicting objectives
+    Task 5: Improved warmup schedule
+    - Hard off for N epochs (5-10)
+    - Then ramp (cosine or linear) to max_weight
+    - Supports warmup_start_epoch for resume
     
     Args:
         base_loss: EnergyOODLoss instance (with max weight configured)
         warmup_epochs: Number of epochs with energy disabled (default: 15)
         max_epochs: Total training epochs (for cosine schedule)
         warmup_schedule: "cosine" or "linear" (default: "cosine")
+        warmup_start_epoch: Virtual starting epoch for warmup (for resume from weights)
     """
     
     def __init__(
@@ -250,6 +360,7 @@ class EnergyOODLossWithWarmup(nn.Module):
         temperature: float = 1.0,
         max_weight: float = 0.002,  # Conservative max weight
         m_in: float = -25.0,
+        m_out: float = -7.0,
         warmup_epochs: int = 15,
         max_epochs: int = 50,
         warmup_schedule: str = "cosine",
@@ -260,6 +371,7 @@ class EnergyOODLossWithWarmup(nn.Module):
             temperature=temperature,
             weight=max_weight,  # This is the MAX weight after warmup
             m_in=m_in,
+            m_out=m_out,
         )
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
@@ -276,14 +388,15 @@ class EnergyOODLossWithWarmup(nn.Module):
         """
         Compute current energy weight based on warmup schedule.
         
-        Uses warmup_start_epoch to account for virtual epoch offset when resuming
-        from weights (e.g., if resuming from epoch 16, warmup_start_epoch=16).
+        Task 5: Improved warmup schedule
+        - Hard off for warmup_epochs
+        - Then ramp (cosine or linear) to max_weight
+        - Uses warmup_start_epoch to account for virtual epoch offset when resuming
         
         Returns:
             Current weight (0.0 during warmup, then gradually increases)
         """
         # Adjust current epoch by warmup_start_epoch offset
-        # This allows skipping warmup when resuming from already-trained weights
         adjusted_epoch = self.current_epoch + self.warmup_start_epoch
         
         if adjusted_epoch < self.warmup_epochs:
@@ -306,32 +419,54 @@ class EnergyOODLossWithWarmup(nn.Module):
         
     def forward(
         self,
-        class_logits: torch.Tensor,
-        target_labels: Optional[torch.Tensor] = None,
+        pixel_logits: Optional[torch.Tensor] = None,
+        ood_mask: Optional[torch.Tensor] = None,
+        class_logits: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute Energy loss with warmup.
         
         During warmup (epochs 0-warmup_epochs): returns 0.0
         After warmup: gradually increases energy loss weight
+        
+        Args:
+            pixel_logits: Per-pixel logits [B, C, H, W] (Task 6 Option A - preferred)
+            ood_mask: OOD mask [B, H, W] (required if pixel_logits provided)
+            class_logits: Query-level class logits [B, Q, C+1] (legacy)
         """
         current_weight = self.get_current_weight()
         
         if current_weight == 0.0:
             # Warmup phase: return zero loss
-            return torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
+            if pixel_logits is not None:
+                device = pixel_logits.device
+                dtype = pixel_logits.dtype
+            elif class_logits is not None:
+                device = class_logits.device
+                dtype = class_logits.dtype
+            else:
+                device = torch.device("cpu")
+                dtype = torch.float32
+            return torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
         
         # Safety check: ensure logits are finite before computing loss
-        if not torch.isfinite(class_logits).all():
-            # If logits contain NaN/Inf, return zero loss to avoid crashing
+        if pixel_logits is not None and not torch.isfinite(pixel_logits).all():
+            return torch.tensor(0.0, device=pixel_logits.device, dtype=pixel_logits.dtype, requires_grad=True)
+        if class_logits is not None and not torch.isfinite(class_logits).all():
             return torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
         
         # Compute base energy loss
-        energy_loss = self.base_loss(class_logits, target_labels)
+        energy_loss = self.base_loss(
+            pixel_logits=pixel_logits,
+            ood_mask=ood_mask,
+            class_logits=class_logits,
+        )
         
         # Safety check: ensure loss is finite
         if not torch.isfinite(energy_loss):
-            energy_loss = torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
+            device = energy_loss.device
+            dtype = energy_loss.dtype
+            energy_loss = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
         
         # Scale by current warmup weight
         # base_loss already applies self.base_loss.weight, so we need to adjust
@@ -341,7 +476,9 @@ class EnergyOODLossWithWarmup(nn.Module):
         
         # Final safety check: ensure final loss is finite
         if not torch.isfinite(final_loss):
-            final_loss = torch.tensor(0.0, device=class_logits.device, dtype=class_logits.dtype, requires_grad=True)
+            device = final_loss.device
+            dtype = final_loss.dtype
+            final_loss = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
         
         return final_loss
     

@@ -93,13 +93,23 @@ class MaskClassificationLoss(Mask2FormerLoss):
         class_queries_logits: Optional[torch.Tensor] = None,
     ): 
         # =================================================================
+        # STEP 0: Check if ood_mask is available (used for multiple decisions)
+        # =================================================================
+        # PUNTO CRITICO #2: Disabilitare LogitNorm quando OOD è presente
+        ood_mask_available = targets and any("ood_mask" in target for target in targets)
+        
+        # =================================================================
         # STEP 1: Save original logits BEFORE normalization
         # =================================================================
-        # Clone logits ONLY if both Energy Loss and Logit Norm are enabled
+        # Clone logits if both Energy Loss and Logit Norm are enabled AND LogitNorm will be applied
         # This avoids unnecessary overhead if one is disabled
-        if (self.eim_enabled and 
+        logit_norm_will_be_applied = (
             self.logit_norm_enabled and 
-            class_queries_logits is not None):
+            class_queries_logits is not None and 
+            not ood_mask_available  # PUNTO CRITICO #2: Skip LogitNorm when OOD present
+        )
+        
+        if self.eim_enabled and logit_norm_will_be_applied and class_queries_logits is not None:
             # Clone for Energy Loss (will be used AFTER normalization)
             # Clone WITHOUT detach to maintain gradients for Energy Loss
             # Use contiguous() to ensure proper memory layout for AMP compatibility
@@ -118,14 +128,18 @@ class MaskClassificationLoss(Mask2FormerLoss):
                 # Convert complex to real (take real part) - should not happen, but safety
                 class_queries_logits_original = class_queries_logits_original.real
         else:
-            # If Logit Norm disabled, use same logits (no clone needed)
+            # If Logit Norm disabled or OOD present, use same logits (no clone needed)
             class_queries_logits_original = class_queries_logits
 
         # =================================================================
         # STEP 2: Apply Logit Normalization (modifies IN-PLACE)
         # =================================================================
+        # PUNTO CRITICO #2: Disabilitare LogitNorm quando OOD è presente
+        # LogitNorm appiattisce la confidenza e regolarizza proprio dove vogliamo
+        # incertezza/energia alta (OOD pasted). Applicare solo su ID puro.
         # Normalization improves calibration for matcher/standard losses
-        if self.logit_norm_enabled and class_queries_logits is not None:
+        # BUT: Skip when OOD is present to avoid regularizing uncertainty away
+        if logit_norm_will_be_applied:
             # Force float32 for logit normalization computations (better numerical stability)
             # This prevents NaN/Inf issues similar to energy/logsumexp
             logits_f32 = class_queries_logits.float() if class_queries_logits.dtype != torch.float32 else class_queries_logits
@@ -158,20 +172,76 @@ class MaskClassificationLoss(Mask2FormerLoss):
         # =================================================================
         # Energy Loss requires original scale for correct margin values (m_in=-25.0)
         # Logit normalization changes scale drastically, making margins invalid
+        # Task 6: Option A - Use per-pixel logits if ood_mask is available (preferred)
         losses = {**loss_masks, **loss_classes}
         if self.eim_enabled and class_queries_logits_original is not None:
-            # Safety check: ensure logits are finite before computing energy loss
-            if torch.isfinite(class_queries_logits_original).all():
-                energy_loss = self.energy_ood_loss(class_queries_logits_original)  # Use original logits
-                # Ensure loss is finite (safety check)
-                if torch.isfinite(energy_loss):
-                    losses["eim"] = energy_loss  # Keep "eim" key for compatibility with logging
+            # ood_mask_available already checked at STEP 0
+            if ood_mask_available:
+                # Task 6: Option A - Use per-pixel logits (preferred, aligns with inference)
+                try:
+                    # Get ood_mask from targets and stack to [B, H, W]
+                    ood_mask_list = []
+                    for target in targets:
+                        if "ood_mask" in target:
+                            ood_mask_list.append(target["ood_mask"])
+                        else:
+                            # If some targets don't have ood_mask, use legacy method
+                            ood_mask_available = False
+                            break
+                    
+                    if ood_mask_available and ood_mask_list:
+                        ood_mask_tensor = torch.stack(ood_mask_list)  # [B, H, W]
+                        target_h, target_w = ood_mask_tensor.shape[-2:]
+                        
+                        # Import to_per_pixel_logits_semantic as static method
+                        from training.lightning_module import LightningModule
+                        to_per_pixel_logits_semantic = LightningModule.to_per_pixel_logits_semantic
+                        
+                        # Interpolate masks_queries_logits to match ood_mask resolution
+                        from torch.nn.functional import interpolate
+                        masks_queries_logits_interp = interpolate(
+                            masks_queries_logits, 
+                            (target_h, target_w), 
+                            mode="bilinear", 
+                            align_corners=False
+                        )  # [B, Q, H, W]
+                        
+                        # Compute per-pixel logits
+                        pixel_logits = to_per_pixel_logits_semantic(
+                            masks_queries_logits_interp, 
+                            class_queries_logits_original
+                        )  # [B, C, H, W]
+                        
+                        # Safety check: ensure logits are finite
+                        if torch.isfinite(pixel_logits).all():
+                            energy_loss = self.energy_ood_loss(
+                                pixel_logits=pixel_logits,
+                                ood_mask=ood_mask_tensor,
+                            )
+                            if torch.isfinite(energy_loss):
+                                losses["eim"] = energy_loss
+                            else:
+                                losses["eim"] = torch.tensor(0.0, device=pixel_logits.device, dtype=pixel_logits.dtype, requires_grad=True)
+                        else:
+                            losses["eim"] = torch.tensor(0.0, device=class_queries_logits_original.device, dtype=class_queries_logits_original.dtype, requires_grad=True)
+                    else:
+                        ood_mask_available = False
+                except Exception as e:
+                    # If per-pixel logits computation fails, fall back to legacy method
+                    import logging
+                    logging.warning(f"⚠️ Failed to compute per-pixel logits for energy loss: {e}, using legacy method")
+                    ood_mask_available = False
+            
+            # Legacy: Use query-level logits (for backward compatibility or if ood_mask not available)
+            if not ood_mask_available:
+                if torch.isfinite(class_queries_logits_original).all():
+                    energy_loss = self.energy_ood_loss(class_logits=class_queries_logits_original)  # Use original logits
+                    if torch.isfinite(energy_loss):
+                        losses["eim"] = energy_loss
+                    else:
+                        losses["eim"] = torch.tensor(0.0, device=class_queries_logits_original.device, dtype=class_queries_logits_original.dtype, requires_grad=True)
                 else:
-                    # If energy loss is NaN/Inf, use zero loss to avoid crashing
                     losses["eim"] = torch.tensor(0.0, device=class_queries_logits_original.device, dtype=class_queries_logits_original.dtype, requires_grad=True)
-            else:
-                # Logits contain NaN/Inf, use zero loss
-                losses["eim"] = torch.tensor(0.0, device=class_queries_logits_original.device, dtype=class_queries_logits_original.dtype, requires_grad=True)
             
             # Compute and store energy statistics for logging
             # Statistics are computed on original logits (before normalization)

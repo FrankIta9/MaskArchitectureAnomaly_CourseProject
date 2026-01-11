@@ -132,7 +132,7 @@ class OutlierExposureTransform(nn.Module):
         obj_mask: torch.Tensor,
         position: Tuple[int, int],
         scale: float,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    ) -> Tuple[torch.Tensor, Dict[str, Any], torch.Tensor]:
         """
         Paste an object onto the image at the given position.
         
@@ -145,10 +145,13 @@ class OutlierExposureTransform(nn.Module):
             scale: Scale factor for the object
             
         Returns:
-            Modified image and target
+            Modified image, target, and binary paste_mask (H, W) indicating where object was pasted
         """
         h, w = img.shape[-2:]
         obj_h, obj_w = obj_img.shape[-2:]
+        
+        # Initialize paste_mask as zeros (no paste yet)
+        paste_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
         
         # Resize object based on scale
         new_h = int(obj_h * scale)
@@ -199,13 +202,16 @@ class OutlierExposureTransform(nn.Module):
                 )
                 img_clone[c, y:y+new_h, x:x+new_w] = blended
             
+            # Task 1: Save binary paste_mask (use original obj_mask_resized without feathering for precise mask)
+            paste_mask[y:y+new_h, x:x+new_w] = paste_mask[y:y+new_h, x:x+new_w] | obj_mask_resized
+            
             # For Outlier Exposure: paste object visually but DON'T add to targets
             # The model should learn to predict "no object" for these regions naturally
             # This is the standard approach for OE in anomaly segmentation
             
-            return img_clone, target
+            return img_clone, target, paste_mask
         
-        return img, target
+        return img, target, paste_mask
     
     def forward(
         self,
@@ -220,16 +226,25 @@ class OutlierExposureTransform(nn.Module):
             target: Target dictionary with masks and labels
             
         Returns:
-            Transformed image and target
+            Transformed image and target (with ood_mask added)
         """
+        h, w = img.shape[-2:]
+        
+        # Initialize ood_mask: 0 = ID, 1 = OOD, 255 = ignore (opzionale)
+        ood_mask = torch.zeros((h, w), dtype=torch.uint8, device=img.device)
+        
         if random.random() > self.paste_probability:
+            # No paste: all pixels are ID (0)
+            target["ood_mask"] = ood_mask
             return img, target
         
         num_objects = random.randint(self.min_objects, self.max_objects)
-        h, w = img.shape[-2:]
         
         # Get drivable mask once for all objects
         drivable_mask = self._get_drivable_mask(target, h, w)
+        
+        # Accumulate paste_mask from all pasted objects
+        cumulative_paste_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
         
         for _ in range(num_objects):
             # Get random outlier object
@@ -289,10 +304,23 @@ class OutlierExposureTransform(nn.Module):
                 scale = self._apply_perspective_aware_scale(base_scale, y, h)
                 scale = max(self.min_scale, min(self.max_scale * 1.5, scale))
             
-            # Paste object
-            img, target = self._paste_object(
+            # Paste object and get paste_mask
+            img, target, paste_mask = self._paste_object(
                 img, target, obj_img, obj_mask, (x, y), scale
             )
+            
+            # Accumulate paste_mask
+            cumulative_paste_mask = cumulative_paste_mask | paste_mask
+        
+        # Task 1: Build ood_mask: 1 = OOD (pasted), 0 = ID (rest)
+        ood_mask = cumulative_paste_mask.uint8()  # 1 = OOD, 0 = ID
+        
+        # Optional: Set 255 for ignore pixels (where target is ignore)
+        # Note: In Cityscapes, ignore pixels are filtered in target_parser, so this is optional
+        # If needed, we could check target["masks"] for ignore regions, but typically not needed
+        
+        # Add ood_mask to target
+        target["ood_mask"] = ood_mask
         
         return img, target
     
