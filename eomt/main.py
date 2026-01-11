@@ -29,66 +29,9 @@ os.environ["TORCH_LOGS"] = "-dynamo"
 # NOTA: save_weights_only=false è configurato nel YAML per salvare anche optimizer state
 # Questo permette di riprendere il training con --resume_from senza KeyError
 
-# Patch CheckpointConnector per gestire gracefully checkpoint senza optimizer state
-# Questo evita KeyError quando si tenta di riprendere il training da checkpoint con solo pesi modello
-from lightning.pytorch.trainer.connectors.checkpoint_connector import CheckpointConnector
-
-_original_restore_optimizers = CheckpointConnector.restore_optimizers_and_schedulers
-
-def _safe_restore_optimizers(self, checkpoint):
-    """Sovrascrive restore_optimizers_and_schedulers per gestire checkpoint senza optimizer state."""
-    if checkpoint is None:
-        return _original_restore_optimizers(self, checkpoint)
-    
-    # Verifica se il checkpoint ha optimizer state
-    has_optimizer = (
-        "optimizer_states" in checkpoint 
-        and checkpoint.get("optimizer_states") is not None
-        and len(checkpoint.get("optimizer_states", [])) > 0
-    )
-    
-    if not has_optimizer:
-        # Checkpoint contiene solo pesi → salta ripristino optimizer (sarà re-inizializzato)
-        logging.warning(
-            "⚠️ Checkpoint contains only model weights (no optimizer state). "
-            "Skipping optimizer restore - optimizer will be re-initialized and training will restart from epoch 0."
-        )
-        logging.info("💡 TIP: For proper resume, use checkpoints saved with save_weights_only=false")
-        logging.info("💡 Or, extract weights using extract_model_weights.py and use as model.ckpt_path in YAML")
-        
-        # Reset epoch e global_step nel trainer per ripartire da capo
-        if hasattr(self, "trainer") and self.trainer is not None:
-            # Reset training state for fresh start
-            if hasattr(self.trainer, "current_epoch"):
-                self.trainer.current_epoch = 0
-            if hasattr(self.trainer, "global_step"):
-                self.trainer.global_step = 0
-        
-        # Salta ripristino optimizer (sarà re-inizializzato automaticamente)
-        # Non sollevare KeyError, semplicemente ritorna None
-        return None
-    
-    # Checkpoint completo → usa comportamento normale
-    try:
-        return _original_restore_optimizers(self, checkpoint)
-    except KeyError as e:
-        if "optimizer" in str(e).lower() or "optimizer_states" in str(e) or "only the model" in str(e).lower():
-            # Errore relativo a optimizer state mancante → gestisci gracefully
-            logging.warning(f"⚠️ Error restoring optimizer state: {e}")
-            logging.info("💡 Optimizer will be re-initialized and training will restart from epoch 0")
-            # Reset epoch e global_step
-            if hasattr(self, "trainer") and self.trainer is not None:
-                if hasattr(self.trainer, "current_epoch"):
-                    self.trainer.current_epoch = 0
-                if hasattr(self.trainer, "global_step"):
-                    self.trainer.global_step = 0
-            return None
-        else:
-            # Altro tipo di KeyError → rilancia
-            raise
-
-# Applica la patch globale al CheckpointConnector
-CheckpointConnector.restore_optimizers_and_schedulers = _safe_restore_optimizers
+# NOTE: CheckpointConnector patch removed - API changed in newer PyTorch Lightning versions
+# The checkpoint restoration is now handled directly by Lightning's built-in mechanism
+# When save_weights_only=false (as configured in YAML), optimizer state is properly saved/restored
 
 
 _orig_single = _t.raise_unexpected_value
