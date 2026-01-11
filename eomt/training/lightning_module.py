@@ -185,33 +185,37 @@ class LightningModule(lightning.LightningModule):
         # ===================================================================
         if hasattr(self.network, 'encoder'):
             if self.unfreeze_last_n_blocks > 0:
-                # Partial unfreeze: freeze all blocks except last N
-                if hasattr(self.network.encoder, 'backbone') and hasattr(self.network.encoder.backbone, 'blocks'):
-                    total_blocks = len(self.network.encoder.backbone.blocks)
-                    freeze_until = total_blocks - self.unfreeze_last_n_blocks
+                # CRITICAL FIX: Freeze ENTIRE backbone first (including patch_embed, pos_embed, etc.)
+                if hasattr(self.network.encoder, 'backbone'):
+                    # 1) FREEZE TUTTO IL BACKBONE (incluso patch_embed, pos_embed, ecc.)
+                    for param in self.network.encoder.backbone.parameters():
+                        param.requires_grad = False
                     
-                    frozen_params = 0
-                    unfrozen_params = 0
-                    
-                    # Freeze all blocks except last N
-                    for i, block in enumerate(self.network.encoder.backbone.blocks):
-                        if i < freeze_until:
-                            for param in block.parameters():
-                                param.requires_grad = False
-                                frozen_params += param.numel()
-                        else:
-                            for param in block.parameters():
+                    # 2) UNFREEZE SOLO GLI ULTIMI N BLOCKS + NORM
+                    if hasattr(self.network.encoder.backbone, 'blocks'):
+                        total_blocks = len(self.network.encoder.backbone.blocks)
+                        unfrozen_params = 0
+                        
+                        # Unfreeze last N blocks
+                        for i in range(total_blocks - self.unfreeze_last_n_blocks, total_blocks):
+                            for param in self.network.encoder.backbone.blocks[i].parameters():
                                 param.requires_grad = True
                                 unfrozen_params += param.numel()
-                    
-                    # Also unfreeze final norm if present
-                    if hasattr(self.network.encoder.backbone, 'norm'):
-                        for param in self.network.encoder.backbone.norm.parameters():
-                            param.requires_grad = True
-                            unfrozen_params += param.numel()
-                    
-                    print(f"🔒 Backbone PARTIALLY FROZEN: {frozen_params:,} params frozen, {unfrozen_params:,} params unfrozen (last {self.unfreeze_last_n_blocks} blocks)")
-                    print(f"✅ Training decoder + last {self.unfreeze_last_n_blocks} backbone blocks")
+                        
+                        # Also unfreeze final norm if present
+                        if hasattr(self.network.encoder.backbone, 'norm'):
+                            for param in self.network.encoder.backbone.norm.parameters():
+                                param.requires_grad = True
+                                unfrozen_params += param.numel()
+                        
+                        # Count frozen params for logging
+                        frozen_params = sum(p.numel() for p in self.network.encoder.backbone.parameters() if not p.requires_grad)
+                        
+                        # Verification: check that patch_embed is frozen
+                        patch_embed_frozen = next(self.network.encoder.backbone.patch_embed.proj.parameters()).requires_grad == False
+                        print(f"🔒 Backbone PARTIALLY FROZEN: {frozen_params:,} params frozen, {unfrozen_params:,} params unfrozen (last {self.unfreeze_last_n_blocks} blocks + norm)")
+                        print(f"✅ Training decoder + last {self.unfreeze_last_n_blocks} backbone blocks + norm")
+                        print(f"✅ VERIFICATION: patch_embed.proj.weight.requires_grad = {not patch_embed_frozen} (should be False: {patch_embed_frozen})")
                 else:
                     # Fallback: freeze all encoder params
                     frozen_params = 0
