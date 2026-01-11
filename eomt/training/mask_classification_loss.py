@@ -126,9 +126,17 @@ class MaskClassificationLoss(Mask2FormerLoss):
         # =================================================================
         # Normalization improves calibration for matcher/standard losses
         if self.logit_norm_enabled and class_queries_logits is not None:
-            logits_noobj = class_queries_logits[..., :-1]                 # [B, Q, C]
+            # Force float32 for logit normalization computations (better numerical stability)
+            # This prevents NaN/Inf issues similar to energy/logsumexp
+            logits_f32 = class_queries_logits.float() if class_queries_logits.dtype != torch.float32 else class_queries_logits
+            logits_noobj = logits_f32[..., :-1]                 # [B, Q, C]
             norm = logits_noobj.norm(p=2, dim=-1, keepdim=True)  # [B, Q, 1]
-            class_queries_logits = class_queries_logits / (self.logit_norm_tau * (norm + self.logit_norm_eps))
+            class_queries_logits_normalized = logits_f32 / (self.logit_norm_tau * (norm + self.logit_norm_eps))
+            # Convert back to original dtype if needed
+            if class_queries_logits.dtype != torch.float32:
+                class_queries_logits = class_queries_logits_normalized.to(class_queries_logits.dtype)
+            else:
+                class_queries_logits = class_queries_logits_normalized
 
         mask_labels = [
             target["masks"].to(masks_queries_logits.dtype) for target in targets

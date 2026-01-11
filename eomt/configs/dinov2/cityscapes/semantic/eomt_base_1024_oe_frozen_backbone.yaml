@@ -46,7 +46,7 @@ trainer:
   
   # Batch size più grande possibile con decoder-only training
   accumulate_grad_batches: 1  # Effective = batch_size
-  precision: "16-mixed"
+  precision: "16-mixed"  # Use "bf16-mixed" if GPU supports it (A100/L4/T4+), more stable than fp16
   
   # Gradient clipping for stability (critical for AMP and training stability)
   gradient_clip_val: 0.3  # More conservative than 1.0, safer for AMP
@@ -128,10 +128,10 @@ model:
     logit_norm_eps: 1e-6
     
     # ===== PARTIAL BACKBONE UNFREEZE =====
-    # Unfreeze last 2 ViT blocks for fine-tuning
-    lr_decoder: 3e-6  # LR for decoder/head/upscale params
-    lr_backbone: 5e-7  # LR for unfrozen backbone blocks (lower than decoder)
-    unfreeze_last_n_blocks: 2  # Unfreeze last 2 ViT blocks (out of 12 total)
+    # Unfreeze last 1 ViT block for fine-tuning (safe option for stability)
+    lr_decoder: 2e-6  # LR for decoder/head/upscale params (reduced from 3e-6 for stability)
+    lr_backbone: 1e-7  # LR for unfrozen backbone blocks (reduced from 5e-7 for stability)
+    unfreeze_last_n_blocks: 1  # Unfreeze last 1 ViT block (reduced from 2 for stability, avoids NaN on qkv)
     
     # ===== OOD VALIDATION DURING TRAINING =====
     # Lightweight validation on OOD datasets at each epoch end
