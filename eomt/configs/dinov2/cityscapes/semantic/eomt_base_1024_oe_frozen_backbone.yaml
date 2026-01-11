@@ -64,11 +64,10 @@ trainer:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: "/content/drive/MyDrive/eomt_oe_frozen_backbone"
-        filename: "eomt_frozen-{epoch:03d}-{losses/train_loss_total:.4f}"
-        monitor: "losses/train_loss_total"  # Monitor training loss (always available, even without validation)
-        mode: "min"  # Salva checkpoint con loss minore (migliore)
-        save_top_k: 3  # Salva sempre i migliori 3 checkpoint (basati su training loss)
-        save_last: false  # Non serve se save_top_k=3 (salva già gli ultimi migliori)
+        filename: "eomt_frozen-{epoch:03d}-{step}"
+        # No monitor: save last N checkpoints chronologically (not based on metric)
+        save_top_k: 3  # Salva sempre gli ultimi 3 checkpoint cronologicamente
+        save_last: false  # Non serve se save_top_k=3 (salva già gli ultimi)
         save_weights_only: false  # IMPORTANTE: Salva anche optimizer state per permettere resume
         # Se save_weights_only=true, non puoi riprendere il training (solo pesi modello)
         # Se save_weights_only=false (default), puoi riprendere con --resume_from
