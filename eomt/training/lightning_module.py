@@ -237,15 +237,21 @@ class LightningModule(lightning.LightningModule):
                 continue  # Skip frozen parameters
             
             # Check if parameter belongs to encoder.backbone.blocks (last N blocks)
+            # Task 2B: Robust block index parsing - find "blocks" token and read next numeric token
             is_backbone_param = False
             if self.unfreeze_last_n_blocks > 0 and 'encoder.backbone.blocks' in name:
-                # Extract block index from name (e.g., "encoder.backbone.blocks.10.attn...")
+                # Robust parsing: split by '.' and find index of 'blocks', then check next token
                 parts = name.split('.')
-                if len(parts) >= 4 and parts[3].isdigit():
-                    block_idx = int(parts[3])
-                    total_blocks = len(self.network.encoder.backbone.blocks) if hasattr(self.network.encoder.backbone, 'blocks') else 0
-                    if block_idx >= (total_blocks - self.unfreeze_last_n_blocks):
-                        is_backbone_param = True
+                try:
+                    blocks_idx = parts.index('blocks')
+                    if blocks_idx + 1 < len(parts) and parts[blocks_idx + 1].isdigit():
+                        block_idx = int(parts[blocks_idx + 1])
+                        total_blocks = len(self.network.encoder.backbone.blocks) if hasattr(self.network.encoder.backbone, 'blocks') else 0
+                        if total_blocks > 0 and block_idx >= (total_blocks - self.unfreeze_last_n_blocks):
+                            is_backbone_param = True
+                except (ValueError, IndexError):
+                    # If parsing fails, treat as decoder param (safer)
+                    pass
             elif self.unfreeze_last_n_blocks > 0 and 'encoder.backbone.norm' in name:
                 # Final norm is also unfrozen
                 is_backbone_param = True

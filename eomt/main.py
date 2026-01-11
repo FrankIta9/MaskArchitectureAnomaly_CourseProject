@@ -267,7 +267,7 @@ def cli_main():
                 LearningRateMonitor(logging_interval="epoch"),
             ],
             "devices": 1,
-            "gradient_clip_val": 1.0,  # Increased from 0.01 for better stability
+            "gradient_clip_val": 0.3,  # Task 3A: Reduced from 1.0 - 0.3 is safer for AMP (0.3-0.5 range)
             "gradient_clip_algorithm": "norm",
         },
     )

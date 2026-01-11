@@ -191,6 +191,7 @@ class MaskClassificationSemantic(LightningModule):
         """
         Lightweight OOD validation on FS_LostFound and fs_static datasets.
         Evaluates 30-50 images per dataset and logs AUPRC and FPR95 metrics.
+        Also logs aggregated metric for checkpointing/earlystopping.
         """
         try:
             # Import here to avoid circular imports
@@ -206,6 +207,8 @@ class MaskClassificationSemantic(LightningModule):
             target_transform = Compose([
                 Resize(self.img_size, Image.NEAREST),
             ])
+            
+            lostfound_auprc, fsstatic_auprc = None, None
             
             # Validate FS_LostFound
             if self.ood_lostfound_path:
@@ -234,6 +237,17 @@ class MaskClassificationSemantic(LightningModule):
                 if fsstatic_auprc is not None:
                     self.log("metrics/ood_fsstatic_auprc", fsstatic_auprc, sync_dist=True)
                     self.log("metrics/ood_fsstatic_fpr95", fsstatic_fpr95, sync_dist=True)
+            
+            # Compute and log aggregated metric (average of both datasets)
+            if lostfound_auprc is not None and fsstatic_auprc is not None:
+                avg_auprc = 0.5 * (lostfound_auprc + fsstatic_auprc)
+                self.log("metrics/ood_avg_auprc", avg_auprc, sync_dist=True)
+            elif lostfound_auprc is not None:
+                # Fallback: use only LostFound if fs_static not available
+                self.log("metrics/ood_avg_auprc", lostfound_auprc, sync_dist=True)
+            elif fsstatic_auprc is not None:
+                # Fallback: use only fs_static if LostFound not available
+                self.log("metrics/ood_avg_auprc", fsstatic_auprc, sync_dist=True)
         except Exception as e:
             # Don't crash training if OOD validation fails
             logging.warning(f"⚠️ OOD validation failed: {e}")
@@ -320,10 +334,18 @@ class MaskClassificationSemantic(LightningModule):
                         ood_gts = np.array(gt_img)
                         
                         # Convert to binary labels (0=ID, 1=OOD, 255=ignore)
+                        # Task 1B: Check if LostFound is already binary before remapping
                         if "LostAndFound" in gt_path or "FS_LostFound" in gt_path:
-                            ood_gts = np.where(ood_gts == 0, 255, ood_gts)  # 0 -> ignore
-                            ood_gts = np.where(ood_gts == 1, 0, ood_gts)  # 1 -> ID
-                            ood_gts = np.where((ood_gts > 1) & (ood_gts < 201), 1, ood_gts)  # 2-200 -> OOD
+                            unique_vals = np.unique(ood_gts)
+                            # Check if already binary (only contains 0, 1, 255)
+                            if set(unique_vals).issubset({0, 1, 255}):
+                                # Already binary: use directly (0=ID, 1=OOD, 255=ignore)
+                                pass
+                            else:
+                                # Need remapping: LostFound format with multiple classes
+                                ood_gts = np.where(ood_gts == 0, 255, ood_gts)  # 0 -> ignore
+                                ood_gts = np.where(ood_gts == 1, 0, ood_gts)  # 1 -> ID
+                                ood_gts = np.where((ood_gts > 1) & (ood_gts < 201), 1, ood_gts)  # 2-200 -> OOD
                         elif "fs_static" in gt_path:
                             # fs_static: 0=ID, 1=OOD (already binary)
                             pass

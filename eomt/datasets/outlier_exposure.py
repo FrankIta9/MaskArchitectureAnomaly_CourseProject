@@ -167,24 +167,11 @@ class OutlierExposureTransform(nn.Module):
             # Clone image for modification
             img_clone = img.clone()
             
-            # Apply partial occlusion: randomly remove 10-30% of object mask
-            occlusion_ratio = random.uniform(0.10, 0.30)
-            num_occluded_pixels = int(obj_mask_resized.sum().item() * occlusion_ratio)
-            if num_occluded_pixels > 0:
-                # Get all mask pixels and randomly remove some
-                mask_coords = torch.nonzero(obj_mask_resized, as_tuple=False)
-                if len(mask_coords) > num_occluded_pixels:
-                    occluded_indices = torch.randperm(len(mask_coords))[:num_occluded_pixels]
-                    for idx in occluded_indices:
-                        oy, ox = mask_coords[idx].tolist()
-                        obj_mask_resized[oy, ox] = False
-            
-            # Feathered alpha blending: apply Gaussian blur to mask edges (sigma~2)
+            # Task 4: Light feathering only (kernel 3-5) - removed color matching, occlusion, shadow
+            # Feathered alpha blending: apply light Gaussian blur to mask edges
             mask_float = obj_mask_resized.float()
-            # Apply Gaussian blur for feathering (use max_pool2d as approximation or direct gaussian if available)
-            # For simplicity, use a small kernel blur effect
             mask_blurred = mask_float.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-            kernel_size = 5  # Approximate sigma~2 with kernel_size=5
+            kernel_size = 3  # Light feathering (kernel 3-5, using 3 for subtlety)
             padding = kernel_size // 2
             # Use avg_pool2d as a simple blur approximation
             mask_blurred = torch.nn.functional.avg_pool2d(
@@ -193,41 +180,8 @@ class OutlierExposureTransform(nn.Module):
             )
             mask_blurred = mask_blurred.squeeze(0).squeeze(0)  # [H, W]
             
-            # Per-patch color matching: match mean/std of object to background patch
+            # Simple alpha blending with feathered mask (no color matching, no shadow, no occlusion)
             bg_patch = img_clone[:, y:y+new_h, x:x+new_w]  # [3, H, W]
-            obj_patch = obj_img_resized  # [3, H, W]
-            
-            # Compute mean/std for background and object (only in mask region for object)
-            for c in range(3):
-                # Background stats (entire patch)
-                bg_mean = bg_patch[c].mean()
-                bg_std = bg_patch[c].std() + 1e-8  # Avoid division by zero
-                
-                # Object stats (only masked region)
-                obj_masked = obj_patch[c][obj_mask_resized]
-                if obj_masked.numel() > 0:
-                    obj_mean = obj_masked.mean()
-                    obj_std = obj_masked.std() + 1e-8
-                    
-                    # Color matching: adjust object to match background statistics
-                    obj_patch_matched = (obj_patch[c] - obj_mean) * (bg_std / obj_std) + bg_mean
-                    obj_patch_matched = torch.clamp(obj_patch_matched, 0.0, 1.0)
-                    obj_img_resized[c] = obj_patch_matched
-            
-            # Cheap shadow: create blurred mask darkening offset down
-            shadow_mask = mask_blurred.clone()
-            # Offset shadow down by a few pixels
-            shadow_offset = 3
-            if shadow_mask.shape[0] > shadow_offset:
-                shadow_mask_shifted = torch.zeros_like(shadow_mask)
-                shadow_mask_shifted[:-shadow_offset, :] = shadow_mask[shadow_offset:, :]
-                shadow_mask = shadow_mask_shifted * 0.3  # Darken by 30%
-                
-                # Apply shadow darkening to background
-                for c in range(3):
-                    bg_patch[c] = bg_patch[c] * (1.0 - shadow_mask * 0.4)  # 40% darkening in shadow region
-            
-            # Final blend: alpha * obj + (1-alpha) * bg with feathered mask
             for c in range(3):
                 blended = (
                     self.blend_alpha * obj_img_resized[c] * mask_blurred + 
@@ -444,14 +398,14 @@ class OutlierExposureTransform(nn.Module):
                         mask_resized = mask_resized.squeeze(0)
                     drivable_mask = drivable_mask | mask_resized.bool()
         
-        # Erode drivable mask (kernel size ~9) to avoid edge placements
+        # Task 5: Erode drivable mask with smaller kernel (kernel_size=5) to avoid edge placements
         if drivable_mask.any():
-            # Use max_pool2d with kernel_size=9 and stride=1 for erosion effect
+            # Use max_pool2d with kernel_size=5 and stride=1 for erosion effect
             # Erosion: erode(mask) = ~dilate(~mask), or use max_pool2d on inverted mask
             mask_float = drivable_mask.float().unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
             # Erosion: min pool on inverted mask, then invert back
             inverted_mask = 1.0 - mask_float
-            kernel_size = 9
+            kernel_size = 5  # Task 5: Reduced from 9 to 5
             padding = kernel_size // 2
             eroded_inverted = torch.nn.functional.max_pool2d(
                 inverted_mask, kernel_size=kernel_size, stride=1, padding=padding
@@ -462,7 +416,7 @@ class OutlierExposureTransform(nn.Module):
         return drivable_mask if drivable_mask.any() else None
     
     def _sample_drivable_position(
-        self, drivable_mask: torch.Tensor, obj_h: int, obj_w: int, h: int, w: int, max_attempts: int = 100
+        self, drivable_mask: torch.Tensor, obj_h: int, obj_w: int, h: int, w: int, max_attempts: int = 250
     ) -> Optional[Tuple[int, int]]:
         """
         Sample a random position within drivable regions that can fit the object.
@@ -511,11 +465,11 @@ class OutlierExposureTransform(nn.Module):
             y_end = y + obj_h
             
             if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
-                # Check if the object region is mostly drivable (at least 80%, was 40%)
+                # Task 5: Check if the object region is mostly drivable (at least 60%, reduced from 80%)
                 region_mask = drivable_mask[y:y_end, x:x_end]
                 if region_mask.numel() > 0:
                     drivable_percentage = region_mask.sum().float() / region_mask.numel()
-                    if drivable_percentage >= 0.8:  # Require 80% drivable (was 40%)
+                    if drivable_percentage >= 0.6:  # Task 5: Reduced from 0.8 to 0.6 (allow 0.6-0.7 range)
                         return (x, y)
         
         # Fallback: return None, will use random position in forward

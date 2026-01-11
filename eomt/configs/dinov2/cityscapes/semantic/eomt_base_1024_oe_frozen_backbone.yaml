@@ -56,9 +56,9 @@ trainer:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: "/content/drive/MyDrive/eomt_oe_frozen_backbone"
-        filename: "eomt_frozen-{epoch:03d}-{metrics/ood_lostfound_auprc:.4f}"
-        monitor: "metrics/ood_lostfound_auprc"  # OOD validation metric (primary)
-        mode: "max"  # Salva checkpoint con AUPRC più alto su LostFound
+        filename: "eomt_frozen-{epoch:03d}-{metrics/ood_avg_auprc:.4f}"
+        monitor: "metrics/ood_avg_auprc"  # Task 1A: Aggregated metric (avg of LostFound + fs_static)
+        mode: "max"  # Salva checkpoint con AUPRC medio più alto
         save_top_k: 3  # Salva top 3 checkpoint per OOD performance
         save_last: true  # Salva sempre ultimo checkpoint
         save_weights_only: false  # IMPORTANTE: Salva anche optimizer state per permettere resume
@@ -67,7 +67,7 @@ trainer:
         every_n_epochs: 1
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
-        monitor: "metrics/ood_lostfound_auprc"
+        monitor: "metrics/ood_avg_auprc"  # Task 1A: Use aggregated metric
         mode: "max"
         patience: 5  # Stop if no improvement for 5 epochs
         min_delta: 0.0001  # Minimum change to qualify as improvement
@@ -105,21 +105,20 @@ model:
     llrd: 0.8  # Ignorato (backbone frozen), ma lasciato per compatibility
     
     # ===== ENERGY OOD CON WARMUP =====
-    # Adjusted for more stable training
+    # Task 6: Adjusted schedule (start at epoch 0, warmup for 10 epochs)
     energy_ood_enabled: true
     energy_ood_max_weight: 0.001  # Reduced from 0.002 for stability
-    energy_warmup_epochs: 8  # Reduced from 10
-    energy_warmup_start_epoch: 5  # Start warmup at epoch 5
-    # Epochs 0-4: Energy DISABLED (pure OE training)
-    # Epochs 5-12: Energy warmup (gradually increases)
-    # Epochs 13+: Energy at full weight (0.001)
+    energy_warmup_epochs: 10  # Task 6: Set to 10 (was 8)
+    energy_warmup_start_epoch: 0  # Task 6: Start at epoch 0 (was 5)
+    # Epochs 0-9: Energy warmup (gradually increases from 0)
+    # Epochs 10+: Energy at full weight (0.001)
     max_epochs: 30
     
     # ===== LOGIT NORMALIZATION ENABLED =====
     # Normalizza logits per migliorare calibrazione anomaly scores
-    # Increased tau for better stability
+    # Task 3B: Reduced tau to avoid over-flattening logits
     logit_norm_enabled: true
-    logit_norm_tau: 0.07  # Increased from 0.04 for better stability
+    logit_norm_tau: 0.05  # Task 3B: Reduced from 0.07 to 0.05 (0.05-0.06 range)
     logit_norm_eps: 1e-6
     
     # ===== PARTIAL BACKBONE UNFREEZE =====
