@@ -457,15 +457,15 @@ class OutlierExposureTransform(nn.Module):
         
         valid_positions = torch.tensor(valid_positions, device=drivable_mask.device, dtype=torch.long)
         
-            # Try to find a position where the object fits
-            for _ in range(max_attempts):
-                # Randomly select a valid position
-                idx = random.randint(0, len(valid_positions) - 1)
-                y, x = valid_positions[idx].tolist()
-                
-                # Position already guaranteed to fit (pre-filtered), but verify bounds
-                x_end = x + obj_w
-                y_end = y + obj_h
+        # Try to find a position where the object fits
+        for _ in range(max_attempts):
+            # Randomly select a valid position
+            idx = random.randint(0, len(valid_positions) - 1)
+            y, x = valid_positions[idx].tolist()
+            
+            # Position already guaranteed to fit (pre-filtered), but verify bounds
+            x_end = x + obj_w
+            y_end = y + obj_h
                 
                 if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
                     # Task 5: Check if the object region is mostly drivable (at least 60%, reduced from 80%)
