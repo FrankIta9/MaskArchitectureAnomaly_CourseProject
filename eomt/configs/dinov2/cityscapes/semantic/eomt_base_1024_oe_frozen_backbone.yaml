@@ -65,7 +65,8 @@ trainer:
       init_args:
         dirpath: "/content/drive/MyDrive/eomt_oe_frozen_backbone"
         filename: "eomt_frozen-{epoch:03d}-{step}"
-        # No monitor: save last N checkpoints chronologically (not based on metric)
+        monitor: "epoch"  # Use epoch as monitor to enable save_top_k (saves last N chronologically)
+        mode: "max"  # Mode required but not used (epoch always increases)
         save_top_k: 3  # Salva sempre gli ultimi 3 checkpoint cronologicamente
         save_last: false  # Non serve se save_top_k=3 (salva già gli ultimi)
         save_weights_only: false  # IMPORTANTE: Salva anche optimizer state per permettere resume
