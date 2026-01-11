@@ -241,6 +241,8 @@ class MaskClassificationSemantic(LightningModule):
                     self.log("metrics/ood_fsstatic_fpr95", fsstatic_fpr95, sync_dist=False)
             
             # Task 1A: Compute and log aggregated metric with robust fallback handling
+            # CRITICAL FIX: Always log ood_avg_auprc to avoid "monitored metric not found" error
+            # If both are None, log -1.0 (safe value: no checkpoint saved, no false early stop, but no crash)
             if lostfound_auprc is not None and fsstatic_auprc is not None:
                 # Both available: use average
                 avg_auprc = 0.5 * (lostfound_auprc + fsstatic_auprc)
@@ -251,7 +253,11 @@ class MaskClassificationSemantic(LightningModule):
             elif fsstatic_auprc is not None:
                 # Fallback: use only fs_static if LostFound missing
                 self.log("metrics/ood_avg_auprc", fsstatic_auprc, sync_dist=False)
-            # If both are None, don't log ood_avg_auprc (prevents NaN/None in checkpoint)
+            else:
+                # CRITICAL FIX: Always log (even with safe value) to avoid Lightning crash
+                # -1.0 is safe: no checkpoint saved, no false early stop, but no "monitored metric not found" error
+                logging.warning("⚠️ Both OOD metrics are None, logging -1.0 as safe fallback for ood_avg_auprc")
+                self.log("metrics/ood_avg_auprc", -1.0, sync_dist=False)
         except Exception as e:
             # Don't crash training if OOD validation fails
             logging.warning(f"⚠️ OOD validation failed: {e}")

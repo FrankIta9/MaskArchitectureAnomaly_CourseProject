@@ -48,6 +48,10 @@ trainer:
   accumulate_grad_batches: 1  # Effective = batch_size
   precision: "16-mixed"
   
+  # Gradient clipping for stability (critical for AMP and training stability)
+  gradient_clip_val: 0.3  # More conservative than 1.0, safer for AMP
+  gradient_clip_algorithm: "norm"  # Use norm-based clipping
+  
   # Checkpoint su Google Drive
   # IMPORTANTE: Monitora mIoU (val_iou_all) perché mIoU più alto = migliori risultati anomaly detection
   # Con frozen backbone, mIoU dovrebbe essere preservato (~80-82% su Cityscapes val)
