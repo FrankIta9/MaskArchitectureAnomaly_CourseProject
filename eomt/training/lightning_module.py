@@ -229,8 +229,9 @@ class LightningModule(lightning.LightningModule):
                 print("✅ Training only decoder for Outlier Exposure fine-tuning")
         
         # Configure optimizer with two param groups: decoder and unfrozen backbone
-        decoder_param_groups = []
-        backbone_param_groups = []
+        # CRITICAL FIX: Group params into 2 lists instead of creating one param group per parameter
+        decoder_params = []
+        backbone_params = []
         
         for name, param in self.named_parameters():
             if not param.requires_grad:
@@ -257,24 +258,35 @@ class LightningModule(lightning.LightningModule):
                 is_backbone_param = True
             
             if is_backbone_param:
-                backbone_param_groups.append(
-                    {"params": [param], "lr": self.lr_backbone, "name": name}
-                )
+                backbone_params.append(param)
             else:
                 # Decoder/head/upscale params
-                decoder_param_groups.append(
-                    {"params": [param], "lr": self.lr_decoder, "name": name}
-                )
+                decoder_params.append(param)
         
-        # Combine param groups
-        all_param_groups = decoder_param_groups + backbone_param_groups
+        # Task 2B: Create only 2 param groups (not one per parameter)
+        param_groups = []
+        if decoder_params:
+            param_groups.append({"params": decoder_params, "lr": self.lr_decoder})
+        if backbone_params:
+            param_groups.append({"params": backbone_params, "lr": self.lr_backbone})
         
-        print(f"🎯 Trainable params: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
-        print(f"   Decoder params: {sum(p['params'][0].numel() for p in decoder_param_groups):,} @ lr={self.lr_decoder}")
-        if backbone_param_groups:
-            print(f"   Backbone params: {sum(p['params'][0].numel() for p in backbone_param_groups):,} @ lr={self.lr_backbone}")
+        # Task 2B: Log param groups info for verification
+        total_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        decoder_numel = sum(p.numel() for p in decoder_params) if decoder_params else 0
+        backbone_numel = sum(p.numel() for p in backbone_params) if backbone_params else 0
         
-        optimizer = AdamW(all_param_groups, weight_decay=self.weight_decay)
+        print(f"🎯 Trainable params: {total_trainable:,}")
+        print(f"   Decoder group: {len(decoder_params)} params, {decoder_numel:,} elements @ lr={self.lr_decoder}")
+        if backbone_params:
+            print(f"   Backbone group: {len(backbone_params)} params, {backbone_numel:,} elements @ lr={self.lr_backbone}")
+            # Task 2B: Show sample backbone param names to verify they are blocks.10, blocks.11, etc.
+            sample_backbone_names = [name for name, p in self.named_parameters() if p in backbone_params[:3]]
+            if sample_backbone_names:
+                print(f"   Sample backbone params: {', '.join(sample_backbone_names[:3])}")
+        else:
+            print("   ⚠️ WARNING: Backbone param group is empty! Unfreeze not working.")
+        
+        optimizer = AdamW(param_groups, weight_decay=self.weight_decay)
 
         # Simplified scheduler: no backbone warmup needed (it's frozen)
         # Only decoder gets warmup + poly decay

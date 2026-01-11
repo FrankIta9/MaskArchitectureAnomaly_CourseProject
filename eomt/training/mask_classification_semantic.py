@@ -238,16 +238,18 @@ class MaskClassificationSemantic(LightningModule):
                     self.log("metrics/ood_fsstatic_auprc", fsstatic_auprc, sync_dist=True)
                     self.log("metrics/ood_fsstatic_fpr95", fsstatic_fpr95, sync_dist=True)
             
-            # Compute and log aggregated metric (average of both datasets)
+            # Task 1A: Compute and log aggregated metric with robust fallback handling
             if lostfound_auprc is not None and fsstatic_auprc is not None:
+                # Both available: use average
                 avg_auprc = 0.5 * (lostfound_auprc + fsstatic_auprc)
                 self.log("metrics/ood_avg_auprc", avg_auprc, sync_dist=True)
             elif lostfound_auprc is not None:
-                # Fallback: use only LostFound if fs_static not available
+                # Fallback: use only LostFound if fs_static missing
                 self.log("metrics/ood_avg_auprc", lostfound_auprc, sync_dist=True)
             elif fsstatic_auprc is not None:
-                # Fallback: use only fs_static if LostFound not available
+                # Fallback: use only fs_static if LostFound missing
                 self.log("metrics/ood_avg_auprc", fsstatic_auprc, sync_dist=True)
+            # If both are None, don't log ood_avg_auprc (prevents NaN/None in checkpoint)
         except Exception as e:
             # Don't crash training if OOD validation fails
             logging.warning(f"⚠️ OOD validation failed: {e}")
@@ -343,6 +345,12 @@ class MaskClassificationSemantic(LightningModule):
                                 pass
                             else:
                                 # Need remapping: LostFound format with multiple classes
+                                # Task 1B: Log warning with unique values info for debugging
+                                unique_sample = unique_vals[:10] if len(unique_vals) > 10 else unique_vals
+                                logging.warning(
+                                    f"⚠️ LostFound GT has non-binary format: unique values (first 10)={unique_sample.tolist()}, "
+                                    f"min={unique_vals.min()}, max={unique_vals.max()}. Applying remapping."
+                                )
                                 ood_gts = np.where(ood_gts == 0, 255, ood_gts)  # 0 -> ignore
                                 ood_gts = np.where(ood_gts == 1, 0, ood_gts)  # 1 -> ID
                                 ood_gts = np.where((ood_gts > 1) & (ood_gts < 201), 1, ood_gts)  # 2-200 -> OOD

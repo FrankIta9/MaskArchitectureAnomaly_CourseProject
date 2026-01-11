@@ -257,6 +257,7 @@ class OutlierExposureTransform(nn.Module):
             obj_w_scaled = min(obj_w_scaled, w)
             
             # Sample position (with drivable region constraint if enabled)
+            # Task 5: Track drivable vs random placements for debugging
             position = None
             if drivable_mask is not None:
                 # Try to sample from drivable regions using scaled dimensions
@@ -266,12 +267,14 @@ class OutlierExposureTransform(nn.Module):
             if position is None:
                 x = random.randint(0, max(0, w - obj_w_scaled))
                 y = random.randint(0, max(0, h - obj_h_scaled))
+                self.random_placement_count += 1  # Task 5: Count random fallback
                 
                 # Re-apply perspective-aware scaling based on final Y position
                 scale = self._apply_perspective_aware_scale(base_scale, y, h)
                 scale = max(self.min_scale, min(self.max_scale * 1.5, scale))
             else:
                 x, y = position
+                self.drivable_placement_count += 1  # Task 5: Count successful drivable placement
                 # Re-apply perspective-aware scaling based on final Y position
                 scale = self._apply_perspective_aware_scale(base_scale, y, h)
                 scale = max(self.min_scale, min(self.max_scale * 1.5, scale))
@@ -454,26 +457,40 @@ class OutlierExposureTransform(nn.Module):
         
         valid_positions = torch.tensor(valid_positions, device=drivable_mask.device, dtype=torch.long)
         
-        # Try to find a position where the object fits
-        for _ in range(max_attempts):
-            # Randomly select a valid position
-            idx = random.randint(0, len(valid_positions) - 1)
-            y, x = valid_positions[idx].tolist()
-            
-            # Position already guaranteed to fit (pre-filtered), but verify bounds
-            x_end = x + obj_w
-            y_end = y + obj_h
-            
-            if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
-                # Task 5: Check if the object region is mostly drivable (at least 60%, reduced from 80%)
-                region_mask = drivable_mask[y:y_end, x:x_end]
-                if region_mask.numel() > 0:
-                    drivable_percentage = region_mask.sum().float() / region_mask.numel()
-                    if drivable_percentage >= 0.6:  # Task 5: Reduced from 0.8 to 0.6 (allow 0.6-0.7 range)
-                        return (x, y)
+            # Try to find a position where the object fits
+            for _ in range(max_attempts):
+                # Randomly select a valid position
+                idx = random.randint(0, len(valid_positions) - 1)
+                y, x = valid_positions[idx].tolist()
+                
+                # Position already guaranteed to fit (pre-filtered), but verify bounds
+                x_end = x + obj_w
+                y_end = y + obj_h
+                
+                if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
+                    # Task 5: Check if the object region is mostly drivable (at least 60%, reduced from 80%)
+                    region_mask = drivable_mask[y:y_end, x:x_end]
+                    if region_mask.numel() > 0:
+                        drivable_percentage = region_mask.sum().float() / region_mask.numel()
+                        if drivable_percentage >= 0.6:  # Task 5: Reduced from 0.8 to 0.6 (allow 0.6-0.7 range)
+                            return (x, y)
         
         # Fallback: return None, will use random position in forward
         return None
+    
+    def _reset_placement_counters(self):
+        """Reset placement counters (called at start of each epoch for logging)"""
+        self.drivable_placement_count = 0
+        self.random_placement_count = 0
+    
+    def _get_placement_stats(self):
+        """Get placement statistics for logging"""
+        total = self.drivable_placement_count + self.random_placement_count
+        if total > 0:
+            drivable_pct = (self.drivable_placement_count / total) * 100
+            random_pct = (self.random_placement_count / total) * 100
+            return drivable_pct, random_pct
+        return 0.0, 0.0
 
 
 class COCOOutlierDataset:
