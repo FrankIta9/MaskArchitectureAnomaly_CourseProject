@@ -309,19 +309,19 @@ class MaskClassificationSemantic(LightningModule):
                         img_pil = Image.open(img_path).convert("RGB")
                         img_tensor = input_transform(img_pil).float().to(device)  # [3, H, W] - NO batch dimension
                         
-                        # Verification log (temporary)
-                        logging.debug(f"OOD validation: img_tensor.shape before windowing = {img_tensor.shape} (expected [3, H, W])")
+                        # Verification log (temporary) - verify input shape before windowing
+                        if img_tensor.dim() != 3 or img_tensor.shape[0] != 3:
+                            logging.warning(f"⚠️ OOD validation: Unexpected img_tensor.shape = {img_tensor.shape} (expected [3, H, W])")
 
                         # Forward pass (use windowing for large images)
                         img_sizes = [img_tensor.shape[-2:]]
                         crops, origins = self.window_imgs_semantic([img_tensor])  # Expects [3, H, W], not [1, 3, H, W]
                         
-                        # Verification log (temporary): check crops format
-                        if len(crops) > 0:
-                            logging.debug(f"OOD validation: crops[0].shape = {crops[0].shape} (expected [1, 3, h, w] or similar)")
+                        # Verification log (temporary): window_imgs_semantic returns torch.stack(crops) = [B, 3, h, w]
+                        if crops.dim() != 4 or crops.shape[1] != 3:
+                            logging.warning(f"⚠️ OOD validation: Unexpected crops.shape = {crops.shape} (expected [B, 3, h, w])")
                         
-                        # window_imgs_semantic returns list of crops, self() expects list or tensor
-                        # If crops need batch dimension, they should already have it from windowing
+                        # window_imgs_semantic returns torch.stack(crops) = [B, 3, h, w] (has batch dimension)
                         mask_logits_per_layer, class_logits_per_layer = self(crops)
                         
                         # Use last layer output
