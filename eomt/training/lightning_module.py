@@ -280,7 +280,14 @@ class LightningModule(lightning.LightningModule):
         if backbone_params:
             print(f"   Backbone group: {len(backbone_params)} params, {backbone_numel:,} elements @ lr={self.lr_backbone}")
             # Task 2B: Show sample backbone param names to verify they are blocks.10, blocks.11, etc.
-            sample_backbone_names = [name for name, p in self.named_parameters() if p in backbone_params[:3]]
+            # Get sample backbone parameter names for logging (avoid tensor comparison)
+            sample_backbone_names = []
+            backbone_param_ids = {id(p) for p in backbone_params[:3]]  # Use id() for identity comparison
+            for name, p in self.named_parameters():
+                if id(p) in backbone_param_ids:
+                    sample_backbone_names.append(name)
+                if len(sample_backbone_names) >= 3:
+                    break
             if sample_backbone_names:
                 print(f"   Sample backbone params: {', '.join(sample_backbone_names[:3])}")
         else:
