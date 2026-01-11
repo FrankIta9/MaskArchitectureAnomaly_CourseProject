@@ -466,14 +466,14 @@ class OutlierExposureTransform(nn.Module):
             # Position already guaranteed to fit (pre-filtered), but verify bounds
             x_end = x + obj_w
             y_end = y + obj_h
-                
-                if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
-                    # Task 5: Check if the object region is mostly drivable (at least 60%, reduced from 80%)
-                    region_mask = drivable_mask[y:y_end, x:x_end]
-                    if region_mask.numel() > 0:
-                        drivable_percentage = region_mask.sum().float() / region_mask.numel()
-                        if drivable_percentage >= 0.6:  # Task 5: Reduced from 0.8 to 0.6 (allow 0.6-0.7 range)
-                            return (x, y)
+            
+            if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
+                # Task 5: Check if the object region is mostly drivable (at least 60%, reduced from 80%)
+                region_mask = drivable_mask[y:y_end, x:x_end]
+                if region_mask.numel() > 0:
+                    drivable_percentage = region_mask.sum().float() / region_mask.numel()
+                    if drivable_percentage >= 0.6:  # Task 5: Reduced from 0.8 to 0.6 (allow 0.6-0.7 range)
+                        return (x, y)
         
         # Fallback: return None, will use random position in forward
         return None
