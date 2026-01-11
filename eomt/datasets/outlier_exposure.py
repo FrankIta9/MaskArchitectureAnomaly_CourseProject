@@ -103,6 +103,11 @@ class OutlierExposureTransform(nn.Module):
         self.use_drivable_regions = use_drivable_regions
         self.drivable_class_ids = drivable_class_ids if drivable_class_ids is not None else [0, 1]  # Road=0, Sidewalk=1 in Cityscapes
         
+        # Task 5: Placement counters for debugging (indicative, not critical)
+        # Note: These are reset at epoch start (not thread-safe with multi-worker)
+        self.drivable_placement_count = 0
+        self.random_placement_count = 0
+    
     def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get a random object from the outlier dataset.
