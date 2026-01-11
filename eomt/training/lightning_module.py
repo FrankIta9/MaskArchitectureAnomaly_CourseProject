@@ -282,7 +282,7 @@ class LightningModule(lightning.LightningModule):
             # Task 2B: Show sample backbone param names to verify they are blocks.10, blocks.11, etc.
             # Get sample backbone parameter names for logging (avoid tensor comparison)
             sample_backbone_names = []
-            backbone_param_ids = {id(p) for p in backbone_params[:3]]  # Use id() for identity comparison
+            backbone_param_ids = {id(p) for p in backbone_params[:3]}  # Use id() for identity comparison
             for name, p in self.named_parameters():
                 if id(p) in backbone_param_ids:
                     sample_backbone_names.append(name)
