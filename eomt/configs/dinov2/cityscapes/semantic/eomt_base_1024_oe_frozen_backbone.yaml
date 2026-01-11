@@ -52,6 +52,10 @@ trainer:
   gradient_clip_val: 0.3  # More conservative than 1.0, safer for AMP
   gradient_clip_algorithm: "norm"  # Use norm-based clipping
   
+  # Disable validation during training (skip validation step)
+  limit_val_batches: 0  # Set to 0 to skip validation completely
+  check_val_every_n_epoch: null  # Disable validation checking
+  
   # Checkpoint su Google Drive
   # IMPORTANTE: Monitora mIoU (val_iou_all) perché mIoU più alto = migliori risultati anomaly detection
   # Con frozen backbone, mIoU dovrebbe essere preservato (~80-82% su Cityscapes val)
