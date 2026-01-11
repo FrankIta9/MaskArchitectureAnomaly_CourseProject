@@ -74,8 +74,10 @@ class EnergyOODLoss(nn.Module):
             # If logits contain NaN/Inf, return safe default energy values
             return torch.full((logits.shape[0], logits.shape[1]), -25.0, device=logits.device, dtype=logits.dtype)
         
-        # Scale logits by temperature
-        scaled_logits = logits / self.temperature
+        # Force float32 for energy/softmax/logsumexp computations (better numerical stability)
+        # Scale logits by temperature (cast to float32 before computation)
+        logits_f32 = logits.float() if logits.dtype != torch.float32 else logits
+        scaled_logits = logits_f32 / self.temperature
         
         # Exclude "no object" class (last class) for ID energy
         # We only consider ID classes for energy computation
@@ -97,10 +99,13 @@ class EnergyOODLoss(nn.Module):
         if not torch.isfinite(id_logits).all():
             id_logits = torch.where(torch.isfinite(id_logits), id_logits, torch.zeros_like(id_logits))
         
-        # Compute logsumexp for numerical stability
+        # Compute logsumexp for numerical stability (ensure float32)
         # Energy = -T * logsumexp(logits / T)
         # logsumexp is numerically stable and handles underflow/overflow
         energy = -self.temperature * torch.logsumexp(id_logits, dim=-1)
+        # Convert back to original dtype if needed
+        if logits.dtype != torch.float32:
+            energy = energy.to(logits.dtype)
         
         # Ensure energy is real (not complex) - should always be true
         if energy.is_complex():

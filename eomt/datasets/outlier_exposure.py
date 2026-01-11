@@ -164,15 +164,74 @@ class OutlierExposureTransform(nn.Module):
             x = max(0, min(x, w - new_w))
             y = max(0, min(y, h - new_h))
             
-            # Blend object into image using the object mask
+            # Clone image for modification
             img_clone = img.clone()
-            # Only blend where the mask is True
+            
+            # Apply partial occlusion: randomly remove 10-30% of object mask
+            occlusion_ratio = random.uniform(0.10, 0.30)
+            num_occluded_pixels = int(obj_mask_resized.sum().item() * occlusion_ratio)
+            if num_occluded_pixels > 0:
+                # Get all mask pixels and randomly remove some
+                mask_coords = torch.nonzero(obj_mask_resized, as_tuple=False)
+                if len(mask_coords) > num_occluded_pixels:
+                    occluded_indices = torch.randperm(len(mask_coords))[:num_occluded_pixels]
+                    for idx in occluded_indices:
+                        oy, ox = mask_coords[idx].tolist()
+                        obj_mask_resized[oy, ox] = False
+            
+            # Feathered alpha blending: apply Gaussian blur to mask edges (sigma~2)
             mask_float = obj_mask_resized.float()
+            # Apply Gaussian blur for feathering (use max_pool2d as approximation or direct gaussian if available)
+            # For simplicity, use a small kernel blur effect
+            mask_blurred = mask_float.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+            kernel_size = 5  # Approximate sigma~2 with kernel_size=5
+            padding = kernel_size // 2
+            # Use avg_pool2d as a simple blur approximation
+            mask_blurred = torch.nn.functional.avg_pool2d(
+                torch.nn.functional.pad(mask_blurred, (padding, padding, padding, padding), mode='reflect'),
+                kernel_size=kernel_size, stride=1
+            )
+            mask_blurred = mask_blurred.squeeze(0).squeeze(0)  # [H, W]
+            
+            # Per-patch color matching: match mean/std of object to background patch
+            bg_patch = img_clone[:, y:y+new_h, x:x+new_w]  # [3, H, W]
+            obj_patch = obj_img_resized  # [3, H, W]
+            
+            # Compute mean/std for background and object (only in mask region for object)
             for c in range(3):
-                # Blend: alpha * obj + (1-alpha) * bg, but only where mask is True
+                # Background stats (entire patch)
+                bg_mean = bg_patch[c].mean()
+                bg_std = bg_patch[c].std() + 1e-8  # Avoid division by zero
+                
+                # Object stats (only masked region)
+                obj_masked = obj_patch[c][obj_mask_resized]
+                if obj_masked.numel() > 0:
+                    obj_mean = obj_masked.mean()
+                    obj_std = obj_masked.std() + 1e-8
+                    
+                    # Color matching: adjust object to match background statistics
+                    obj_patch_matched = (obj_patch[c] - obj_mean) * (bg_std / obj_std) + bg_mean
+                    obj_patch_matched = torch.clamp(obj_patch_matched, 0.0, 1.0)
+                    obj_img_resized[c] = obj_patch_matched
+            
+            # Cheap shadow: create blurred mask darkening offset down
+            shadow_mask = mask_blurred.clone()
+            # Offset shadow down by a few pixels
+            shadow_offset = 3
+            if shadow_mask.shape[0] > shadow_offset:
+                shadow_mask_shifted = torch.zeros_like(shadow_mask)
+                shadow_mask_shifted[:-shadow_offset, :] = shadow_mask[shadow_offset:, :]
+                shadow_mask = shadow_mask_shifted * 0.3  # Darken by 30%
+                
+                # Apply shadow darkening to background
+                for c in range(3):
+                    bg_patch[c] = bg_patch[c] * (1.0 - shadow_mask * 0.4)  # 40% darkening in shadow region
+            
+            # Final blend: alpha * obj + (1-alpha) * bg with feathered mask
+            for c in range(3):
                 blended = (
-                    self.blend_alpha * obj_img_resized[c] * mask_float + 
-                    (1 - self.blend_alpha * mask_float) * img_clone[c, y:y+new_h, x:x+new_w]
+                    self.blend_alpha * obj_img_resized[c] * mask_blurred + 
+                    (1 - self.blend_alpha * mask_blurred) * bg_patch[c]
                 )
                 img_clone[c, y:y+new_h, x:x+new_w] = blended
             
@@ -354,12 +413,15 @@ class OutlierExposureTransform(nn.Module):
             return None
         
         # Safety check: ensure masks and labels have same length
-        num_classes = min(masks.shape[0], len(labels))
+        num_masks = min(masks.shape[0], len(labels))
         
         # Find masks for drivable classes (road=0, sidewalk=1)
         drivable_mask = torch.zeros((h, w), dtype=torch.bool, device=masks.device)
         
-        for i in range(num_classes):
+        # Fix: iterate over len(labels), not num_classes constant
+        for i in range(len(labels)):
+            if i >= num_masks:
+                break  # Safety: don't access masks beyond available
             label_id = labels[i]
             if label_id.item() in self.drivable_class_ids:
                 # Combine masks: road OR sidewalk
@@ -381,6 +443,21 @@ class OutlierExposureTransform(nn.Module):
                     if mask_resized.dim() == 3:
                         mask_resized = mask_resized.squeeze(0)
                     drivable_mask = drivable_mask | mask_resized.bool()
+        
+        # Erode drivable mask (kernel size ~9) to avoid edge placements
+        if drivable_mask.any():
+            # Use max_pool2d with kernel_size=9 and stride=1 for erosion effect
+            # Erosion: erode(mask) = ~dilate(~mask), or use max_pool2d on inverted mask
+            mask_float = drivable_mask.float().unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+            # Erosion: min pool on inverted mask, then invert back
+            inverted_mask = 1.0 - mask_float
+            kernel_size = 9
+            padding = kernel_size // 2
+            eroded_inverted = torch.nn.functional.max_pool2d(
+                inverted_mask, kernel_size=kernel_size, stride=1, padding=padding
+            )
+            eroded_mask = (1.0 - eroded_inverted).squeeze(0).squeeze(0).bool()
+            drivable_mask = eroded_mask
         
         return drivable_mask if drivable_mask.any() else None
     
@@ -408,11 +485,20 @@ class OutlierExposureTransform(nn.Module):
         obj_h = max(1, min(obj_h, h))
         obj_w = max(1, min(obj_w, w))
         
-        # Get all valid positions (where drivable_mask is True)
-        valid_positions = torch.nonzero(drivable_mask, as_tuple=False)  # Shape: (N, 2) with [y, x]
+        # Pre-filter valid positions to ensure top-left fits (y<=h-obj_h, x<=w-obj_w)
+        all_valid_positions = torch.nonzero(drivable_mask, as_tuple=False)  # Shape: (N, 2) with [y, x]
+        
+        # Filter positions where object fits (top-left corner constraint)
+        valid_positions = []
+        for pos in all_valid_positions:
+            y, x = pos.tolist()
+            if y <= h - obj_h and x <= w - obj_w:
+                valid_positions.append([y, x])
         
         if len(valid_positions) == 0:
             return None
+        
+        valid_positions = torch.tensor(valid_positions, device=drivable_mask.device, dtype=torch.long)
         
         # Try to find a position where the object fits
         for _ in range(max_attempts):
@@ -420,23 +506,17 @@ class OutlierExposureTransform(nn.Module):
             idx = random.randint(0, len(valid_positions) - 1)
             y, x = valid_positions[idx].tolist()
             
-            # Check if object fits at this position
-            x_end = min(x + obj_w, w)
-            y_end = min(y + obj_h, h)
-            
-            # Adjust position if object would go out of bounds
-            if x_end > w:
-                x = max(0, w - obj_w)
-                x_end = w
-            if y_end > h:
-                y = max(0, h - obj_h)
-                y_end = h
+            # Position already guaranteed to fit (pre-filtered), but verify bounds
+            x_end = x + obj_w
+            y_end = y + obj_h
             
             if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
-                # Check if the object region is mostly drivable (at least 40%)
+                # Check if the object region is mostly drivable (at least 80%, was 40%)
                 region_mask = drivable_mask[y:y_end, x:x_end]
-                if region_mask.numel() > 0 and region_mask.sum().float() >= (region_mask.numel() * 0.4):
-                    return (x, y)
+                if region_mask.numel() > 0:
+                    drivable_percentage = region_mask.sum().float() / region_mask.numel()
+                    if drivable_percentage >= 0.8:  # Require 80% drivable (was 40%)
+                        return (x, y)
         
         # Fallback: return None, will use random position in forward
         return None

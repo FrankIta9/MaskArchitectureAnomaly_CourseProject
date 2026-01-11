@@ -59,6 +59,9 @@ class LightningModule(lightning.LightningModule):
         ckpt_path=None,
         delta_weights=False,
         load_ckpt_class_head=True,
+        lr_decoder: Optional[float] = None,  # Optional: override LR for decoder/head/upscale
+        lr_backbone: Optional[float] = None,  # Optional: LR for unfrozen backbone blocks
+        unfreeze_last_n_blocks: int = 0,  # Number of last backbone blocks to unfreeze (0 = all frozen)
     ):
         super().__init__()
 
@@ -75,6 +78,9 @@ class LightningModule(lightning.LightningModule):
         self.poly_power = poly_power
         self.warmup_steps = warmup_steps
         self.llrd_l2_enabled = llrd_l2_enabled
+        self.lr_decoder = lr_decoder if lr_decoder is not None else lr
+        self.lr_backbone = lr_backbone if lr_backbone is not None else lr
+        self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
 
         self.strict_loading = False
 
@@ -169,37 +175,100 @@ class LightningModule(lightning.LightningModule):
 
     def configure_optimizers(self):
         # ===================================================================
-        # FREEZE BACKBONE FOR OUTLIER EXPOSURE FINE-TUNING
+        # PARTIAL BACKBONE UNFREEZE FOR OUTLIER EXPOSURE FINE-TUNING
         # ===================================================================
-        # Strategy: Preserve strong Cityscapes semantic features in ViT encoder
-        # Train only decoder (scale_blocks, queries, mask/class heads) to:
-        # - Recognize COCO outliers as "no object"
-        # - Maintain high mIoU on in-distribution classes
-        # - Faster convergence, less overfitting, stable training
+        # Strategy: Unfreeze last N blocks (typically 2) for fine-tuning
+        # Keep most of ViT frozen; unfreeze only last N transformer blocks
+        # Use two optimizer param groups:
+        # - decoder/head/upscale params: lr_decoder
+        # - unfrozen backbone params: lr_backbone (typically lower)
         # ===================================================================
         if hasattr(self.network, 'encoder'):
-            frozen_params = 0
-            for param in self.network.encoder.parameters():
-                param.requires_grad = False
-                frozen_params += param.numel()
-            print(f"🔒 Backbone FROZEN: {frozen_params:,} params")
-            print("✅ Training only decoder for Outlier Exposure fine-tuning")
+            if self.unfreeze_last_n_blocks > 0:
+                # Partial unfreeze: freeze all blocks except last N
+                if hasattr(self.network.encoder, 'backbone') and hasattr(self.network.encoder.backbone, 'blocks'):
+                    total_blocks = len(self.network.encoder.backbone.blocks)
+                    freeze_until = total_blocks - self.unfreeze_last_n_blocks
+                    
+                    frozen_params = 0
+                    unfrozen_params = 0
+                    
+                    # Freeze all blocks except last N
+                    for i, block in enumerate(self.network.encoder.backbone.blocks):
+                        if i < freeze_until:
+                            for param in block.parameters():
+                                param.requires_grad = False
+                                frozen_params += param.numel()
+                        else:
+                            for param in block.parameters():
+                                param.requires_grad = True
+                                unfrozen_params += param.numel()
+                    
+                    # Also unfreeze final norm if present
+                    if hasattr(self.network.encoder.backbone, 'norm'):
+                        for param in self.network.encoder.backbone.norm.parameters():
+                            param.requires_grad = True
+                            unfrozen_params += param.numel()
+                    
+                    print(f"🔒 Backbone PARTIALLY FROZEN: {frozen_params:,} params frozen, {unfrozen_params:,} params unfrozen (last {self.unfreeze_last_n_blocks} blocks)")
+                    print(f"✅ Training decoder + last {self.unfreeze_last_n_blocks} backbone blocks")
+                else:
+                    # Fallback: freeze all encoder params
+                    frozen_params = 0
+                    for param in self.network.encoder.parameters():
+                        param.requires_grad = False
+                        frozen_params += param.numel()
+                    print(f"🔒 Backbone FROZEN (fallback): {frozen_params:,} params")
+            else:
+                # Full freeze: freeze entire backbone
+                frozen_params = 0
+                for param in self.network.encoder.parameters():
+                    param.requires_grad = False
+                    frozen_params += param.numel()
+                print(f"🔒 Backbone FROZEN: {frozen_params:,} params")
+                print("✅ Training only decoder for Outlier Exposure fine-tuning")
         
-        # Now configure optimizer only for trainable (decoder) parameters
+        # Configure optimizer with two param groups: decoder and unfrozen backbone
         decoder_param_groups = []
+        backbone_param_groups = []
         
         for name, param in self.named_parameters():
             if not param.requires_grad:
-                continue  # Skip frozen backbone
+                continue  # Skip frozen parameters
             
-            # All decoder params get base LR (no LLRD needed since backbone frozen)
-            decoder_param_groups.append(
-                {"params": [param], "lr": self.lr, "name": name}
-            )
+            # Check if parameter belongs to encoder.backbone.blocks (last N blocks)
+            is_backbone_param = False
+            if self.unfreeze_last_n_blocks > 0 and 'encoder.backbone.blocks' in name:
+                # Extract block index from name (e.g., "encoder.backbone.blocks.10.attn...")
+                parts = name.split('.')
+                if len(parts) >= 4 and parts[3].isdigit():
+                    block_idx = int(parts[3])
+                    total_blocks = len(self.network.encoder.backbone.blocks) if hasattr(self.network.encoder.backbone, 'blocks') else 0
+                    if block_idx >= (total_blocks - self.unfreeze_last_n_blocks):
+                        is_backbone_param = True
+            elif self.unfreeze_last_n_blocks > 0 and 'encoder.backbone.norm' in name:
+                # Final norm is also unfrozen
+                is_backbone_param = True
+            
+            if is_backbone_param:
+                backbone_param_groups.append(
+                    {"params": [param], "lr": self.lr_backbone, "name": name}
+                )
+            else:
+                # Decoder/head/upscale params
+                decoder_param_groups.append(
+                    {"params": [param], "lr": self.lr_decoder, "name": name}
+                )
+        
+        # Combine param groups
+        all_param_groups = decoder_param_groups + backbone_param_groups
         
         print(f"🎯 Trainable params: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
+        print(f"   Decoder params: {sum(p['params'][0].numel() for p in decoder_param_groups):,} @ lr={self.lr_decoder}")
+        if backbone_param_groups:
+            print(f"   Backbone params: {sum(p['params'][0].numel() for p in backbone_param_groups):,} @ lr={self.lr_backbone}")
         
-        optimizer = AdamW(decoder_param_groups, weight_decay=self.weight_decay)
+        optimizer = AdamW(all_param_groups, weight_decay=self.weight_decay)
 
         # Simplified scheduler: no backbone warmup needed (it's frozen)
         # Only decoder gets warmup + poly decay
