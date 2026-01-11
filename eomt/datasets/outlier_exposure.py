@@ -178,11 +178,16 @@ class OutlierExposureTransform(nn.Module):
             mask_blurred = mask_float.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
             kernel_size = 3  # Light feathering (kernel 3-5, using 3 for subtlety)
             padding = kernel_size // 2
-            # Use avg_pool2d as a simple blur approximation
-            mask_blurred = torch.nn.functional.avg_pool2d(
-                torch.nn.functional.pad(mask_blurred, (padding, padding, padding, padding), mode='reflect'),
-                kernel_size=kernel_size, stride=1
-            )
+            
+            # Check dimensions to ensure padding is valid
+            h_mask, w_mask = mask_blurred.shape[-2:]
+            if h_mask >= kernel_size and w_mask >= kernel_size:
+                # Use avg_pool2d as a simple blur approximation (only if dimensions are large enough)
+                mask_blurred = torch.nn.functional.avg_pool2d(
+                    torch.nn.functional.pad(mask_blurred, (padding, padding, padding, padding), mode='reflect'),
+                    kernel_size=kernel_size, stride=1
+                )
+            # If dimensions are too small, skip feathering (use original mask)
             mask_blurred = mask_blurred.squeeze(0).squeeze(0)  # [H, W]
             
             # Simple alpha blending with feathered mask (no color matching, no shadow, no occlusion)
