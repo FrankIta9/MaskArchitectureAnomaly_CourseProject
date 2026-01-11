@@ -221,8 +221,8 @@ class MaskClassificationSemantic(LightningModule):
                     image_ext="*.png",
                 )
                 if lostfound_auprc is not None:
-                    self.log("metrics/ood_lostfound_auprc", lostfound_auprc, sync_dist=True)
-                    self.log("metrics/ood_lostfound_fpr95", lostfound_fpr95, sync_dist=True)
+                    self.log("metrics/ood_lostfound_auprc", lostfound_auprc, sync_dist=False)
+                    self.log("metrics/ood_lostfound_fpr95", lostfound_fpr95, sync_dist=False)
             
             # Validate fs_static
             if self.ood_fsstatic_path:
@@ -235,21 +235,24 @@ class MaskClassificationSemantic(LightningModule):
                     image_ext="*.jpg",
                 )
                 if fsstatic_auprc is not None:
-                    self.log("metrics/ood_fsstatic_auprc", fsstatic_auprc, sync_dist=True)
-                    self.log("metrics/ood_fsstatic_fpr95", fsstatic_fpr95, sync_dist=True)
+                    self.log("metrics/ood_fsstatic_auprc", fsstatic_auprc, sync_dist=False)
+                    self.log("metrics/ood_fsstatic_fpr95", fsstatic_fpr95, sync_dist=False)
             
             # Task 1A: Compute and log aggregated metric with robust fallback handling
             if lostfound_auprc is not None and fsstatic_auprc is not None:
                 # Both available: use average
                 avg_auprc = 0.5 * (lostfound_auprc + fsstatic_auprc)
-                self.log("metrics/ood_avg_auprc", avg_auprc, sync_dist=True)
+                self.log("metrics/ood_avg_auprc", avg_auprc, sync_dist=False)
             elif lostfound_auprc is not None:
                 # Fallback: use only LostFound if fs_static missing
-                self.log("metrics/ood_avg_auprc", lostfound_auprc, sync_dist=True)
+                self.log("metrics/ood_avg_auprc", lostfound_auprc, sync_dist=False)
             elif fsstatic_auprc is not None:
                 # Fallback: use only fs_static if LostFound missing
-                self.log("metrics/ood_avg_auprc", fsstatic_auprc, sync_dist=True)
+                self.log("metrics/ood_avg_auprc", fsstatic_auprc, sync_dist=False)
             # If both are None, don't log ood_avg_auprc (prevents NaN/None in checkpoint)
+            
+            # CRITICAL FIX #2: Restore training mode after OOD validation
+            self.network.train()
         except Exception as e:
             # Don't crash training if OOD validation fails
             logging.warning(f"⚠️ OOD validation failed: {e}")

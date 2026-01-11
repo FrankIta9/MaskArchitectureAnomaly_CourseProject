@@ -65,12 +65,14 @@ trainer:
         # Se save_weights_only=true, non puoi riprendere il training (solo pesi modello)
         # Se save_weights_only=false (default), puoi riprendere con --ckpt_path
         every_n_epochs: 1
+        auto_insert_metric_name: false  # Avoid strange filename patterns
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: "metrics/ood_avg_auprc"  # Task 1A: Use aggregated metric
         mode: "max"
         patience: 5  # Stop if no improvement for 5 epochs
         min_delta: 0.0001  # Minimum change to qualify as improvement
+        check_on_train_epoch_end: false  # Check after validation epoch end (where ood_avg_auprc is logged)
   
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
