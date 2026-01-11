@@ -193,6 +193,8 @@ class MaskClassificationSemantic(LightningModule):
         Evaluates 30-50 images per dataset and logs AUPRC and FPR95 metrics.
         Also logs aggregated metric for checkpointing/earlystopping.
         """
+        # CRITICAL FIX #2: Save training state and restore it even on exception
+        was_training = self.network.training
         try:
             # Import here to avoid circular imports
             from sklearn.metrics import average_precision_score, roc_curve
@@ -250,12 +252,13 @@ class MaskClassificationSemantic(LightningModule):
                 # Fallback: use only fs_static if LostFound missing
                 self.log("metrics/ood_avg_auprc", fsstatic_auprc, sync_dist=False)
             # If both are None, don't log ood_avg_auprc (prevents NaN/None in checkpoint)
-            
-            # CRITICAL FIX #2: Restore training mode after OOD validation
-            self.network.train()
         except Exception as e:
             # Don't crash training if OOD validation fails
             logging.warning(f"⚠️ OOD validation failed: {e}")
+        finally:
+            # CRITICAL FIX #2: Always restore training mode (even on exception)
+            if was_training:
+                self.network.train()
     
     def _validate_single_ood_dataset(
         self,
