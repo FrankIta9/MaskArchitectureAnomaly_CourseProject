@@ -176,10 +176,11 @@ class MaskClassificationSemantic(LightningModule):
             is_warmup = effective_epoch < energy_loss.warmup_epochs
             
             # Quick check: log obbligatori (una volta per epoca)
-            self.log("dbg/energy/current_epoch", float(self.current_epoch), on_step=False, on_epoch=False, sync_dist=False)
-            self.log("dbg/energy/warmup_start_epoch", float(energy_loss.warmup_start_epoch), on_step=False, on_epoch=False, sync_dist=False)
-            self.log("dbg/energy/effective_epoch", float(effective_epoch), on_step=False, on_epoch=False, sync_dist=False)
-            self.log("dbg/energy/weight", current_weight, on_step=False, on_epoch=False, sync_dist=False)
+            # Nota: in on_train_epoch_start, Lightning richiede almeno on_epoch=True o on_step=True
+            self.log("dbg/energy/current_epoch", float(self.current_epoch), on_step=False, on_epoch=True, sync_dist=False)
+            self.log("dbg/energy/warmup_start_epoch", float(energy_loss.warmup_start_epoch), on_step=False, on_epoch=True, sync_dist=False)
+            self.log("dbg/energy/effective_epoch", float(effective_epoch), on_step=False, on_epoch=True, sync_dist=False)
+            self.log("dbg/energy/weight", current_weight, on_step=False, on_epoch=True, sync_dist=False)
             # Log flag per indicare se warmup_start_epoch è stato impostato automaticamente
             if hasattr(self, '_warmup_start_epoch_auto_set'):
                 self.log("dbg/energy/warmup_start_epoch_auto_set", float(self._warmup_start_epoch_auto_set), on_step=False, on_epoch=True, sync_dist=False)
@@ -188,9 +189,9 @@ class MaskClassificationSemantic(LightningModule):
             if hasattr(energy_loss, 'base_loss'):
                 base_loss = energy_loss.base_loss
                 if hasattr(base_loss, 'm_in') and base_loss.m_in is not None:
-                    self.log("dbg/energy/m_in", float(base_loss.m_in), on_step=False, on_epoch=False, sync_dist=False)
+                    self.log("dbg/energy/m_in", float(base_loss.m_in), on_step=False, on_epoch=True, sync_dist=False)
                 if hasattr(base_loss, 'm_out') and base_loss.m_out is not None:
-                    self.log("dbg/energy/m_out", float(base_loss.m_out), on_step=False, on_epoch=False, sync_dist=False)
+                    self.log("dbg/energy/m_out", float(base_loss.m_out), on_step=False, on_epoch=True, sync_dist=False)
             
             if is_warmup:
                 status_msg = (
