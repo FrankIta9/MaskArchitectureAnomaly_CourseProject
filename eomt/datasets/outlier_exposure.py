@@ -287,38 +287,73 @@ class OutlierExposureTransform(nn.Module):
                 else:
                     base_scale = random.uniform(self.min_scale, self.max_scale)
                 
-                # P0 Fix: Scegli y biased prima (con paste_y_range), poi calcola scale, poi ricalcola dimensioni
-                # 1) Scegli y (biased verso bottom = on-road proxy)
-                y_min_ratio, y_max_ratio = self.paste_y_range
-                y_min = int(y_min_ratio * h)
-                y_max = int(y_max_ratio * h)
-                y = random.randint(y_min, y_max)
-                
-                # 2) Applica scala prospettica basata su y
-                scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                scale = max(self.min_scale, min(self.max_scale * 2.0, scale))  # Allow up to 2.0x for perspective (Fishyscapes-like)
-                
-                # 3) Ricalcola dimensioni con scale finale
-                obj_h_scaled = max(1, int(obj_h_orig * scale))
-                obj_w_scaled = max(1, int(obj_w_orig * scale))
-                obj_h_scaled = min(obj_h_scaled, h)
-                obj_w_scaled = min(obj_w_scaled, w)
-                
-                # 4) Scegli x e clamp y con dimensioni nuove
-                x = random.randint(0, max(0, w - obj_w_scaled))
-                y = min(y, max(0, h - obj_h_scaled))  # Clamp y per evitare overflow
-                
-                # 5) Prova drivable position se abilitato (con dimensioni corrette)
+                # P0 Fix: Ordine ottimizzato - se drivable_mask disponibile, scegli (x,y) PRIMA, poi calcola scale
+                # Se drivable_mask non disponibile, usa ordine classico (y -> scale -> x)
                 if drivable_mask is not None and drivable_mask.any():
-                    # Try to sample from drivable regions using final scaled dimensions
-                    position = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
+                    # ORDINE NUOVO: prima scegli (x,y) drivable, poi calcola scale basato su y
+                    # Usa dimensioni iniziali stimate per trovare posizione valida
+                    obj_h_est = max(1, int(obj_h_orig * base_scale))
+                    obj_w_est = max(1, int(obj_w_orig * base_scale))
+                    obj_h_est = min(obj_h_est, h)
+                    obj_w_est = min(obj_w_est, w)
+                    
+                    # Prova a trovare posizione drivable
+                    position = self._sample_drivable_position(drivable_mask, obj_h_est, obj_w_est, h, w)
                     if position is not None:
                         x, y = position
                         self.drivable_placement_count += 1
+                        
+                        # Ora calcola scale basato su y scelto
+                        scale = self._apply_perspective_aware_scale(base_scale, y, h)
+                        scale = max(self.min_scale, min(self.max_scale * 2.0, scale))  # Allow up to 2.0x for perspective
+                        
+                        # Ricalcola dimensioni con scale finale
+                        obj_h_scaled = max(1, int(obj_h_orig * scale))
+                        obj_w_scaled = max(1, int(obj_w_orig * scale))
+                        obj_h_scaled = min(obj_h_scaled, h)
+                        obj_w_scaled = min(obj_w_scaled, w)
+                        
+                        # Verifica che l'oggetto ci stia ancora nella posizione scelta
+                        if x + obj_w_scaled > w or y + obj_h_scaled > h:
+                            # Se non ci sta, clamp x,y
+                            x = min(x, max(0, w - obj_w_scaled))
+                            y = min(y, max(0, h - obj_h_scaled))
                     else:
-                        self.random_placement_count += 1  # Fallback: usa x,y già scelti (già biased verso bottom)
+                        # Fallback: usa ordine classico se drivable placement fallisce
+                        self.random_placement_count += 1
+                        y_min_ratio, y_max_ratio = self.paste_y_range
+                        y_min = int(y_min_ratio * h)
+                        y_max = int(y_max_ratio * h)
+                        y = random.randint(y_min, y_max)
+                        
+                        scale = self._apply_perspective_aware_scale(base_scale, y, h)
+                        scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
+                        
+                        obj_h_scaled = max(1, int(obj_h_orig * scale))
+                        obj_w_scaled = max(1, int(obj_w_orig * scale))
+                        obj_h_scaled = min(obj_h_scaled, h)
+                        obj_w_scaled = min(obj_w_scaled, w)
+                        
+                        x = random.randint(0, max(0, w - obj_w_scaled))
+                        y = min(y, max(0, h - obj_h_scaled))
                 else:
-                    self.random_placement_count += 1  # No drivable mask: usa x,y già scelti (già biased verso bottom)
+                    # ORDINE CLASSICO: y -> scale -> x (quando non c'è drivable_mask)
+                    self.random_placement_count += 1
+                    y_min_ratio, y_max_ratio = self.paste_y_range
+                    y_min = int(y_min_ratio * h)
+                    y_max = int(y_max_ratio * h)
+                    y = random.randint(y_min, y_max)
+                    
+                    scale = self._apply_perspective_aware_scale(base_scale, y, h)
+                    scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
+                    
+                    obj_h_scaled = max(1, int(obj_h_orig * scale))
+                    obj_w_scaled = max(1, int(obj_w_orig * scale))
+                    obj_h_scaled = min(obj_h_scaled, h)
+                    obj_w_scaled = min(obj_w_scaled, w)
+                    
+                    x = random.randint(0, max(0, w - obj_w_scaled))
+                    y = min(y, max(0, h - obj_h_scaled))
                 
                 # Paste object and get paste_mask
                 img, target, paste_mask = self._paste_object(
@@ -538,12 +573,31 @@ class OutlierExposureTransform(nn.Module):
         # Pre-filter valid positions to ensure top-left fits (y<=h-obj_h, x<=w-obj_w)
         all_valid_positions = torch.nonzero(drivable_mask, as_tuple=False)  # Shape: (N, 2) with [y, x]
         
-        # Filter positions where object fits (top-left corner constraint)
+        # NEW: force bottom placement (use same lower bound as paste_y_range)
+        y_low = int(self.paste_y_range[0] * h)  # e.g. 0.70*h
+        max_y = h - obj_h
+        max_x = w - obj_w
+        
+        # Filter positions where object fits (top-left corner constraint) AND y >= y_low
         valid_positions = []
         for pos in all_valid_positions:
             y, x = pos.tolist()
-            if y <= h - obj_h and x <= w - obj_w:
+            # NEW: y must be in [y_low, max_y] so the object is bottom-biased
+            if y < y_low:
+                continue
+            if y <= max_y and x <= max_x:
                 valid_positions.append([y, x])
+        
+        # Fallback intelligente: se troppo restrittivo, rilassa y_low ma sempre bottom-ish
+        if len(valid_positions) == 0:
+            # fallback: relax y_low to a lower threshold but still bottom-ish
+            y_low_relaxed = int(0.60 * h)
+            for pos in all_valid_positions:
+                y, x = pos.tolist()
+                if y < y_low_relaxed:
+                    continue
+                if y <= max_y and x <= max_x:
+                    valid_positions.append([y, x])
         
         if len(valid_positions) == 0:
             return None
