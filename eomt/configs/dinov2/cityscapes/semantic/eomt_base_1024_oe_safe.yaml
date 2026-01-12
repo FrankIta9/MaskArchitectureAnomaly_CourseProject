@@ -128,10 +128,11 @@ data:
     max_scale: 0.40             # Oggetti più grandi (40% immagine)
     coco_min_area: 3000         # Solo oggetti ben definiti e visibili
     
-    # P0 Fix: Y position range e blending
-    paste_y_range: [0.65, 0.98]  # Bias verso bottom (on-road proxy)
+    # P0 Fix: Y position range e blending (Fishyscapes-like)
+    paste_y_range: [0.70, 0.98]  # Bias verso bottom (on-road proxy) - più aggressivo
     use_perspective_aware: true
-    perspective_strength: 0.8    # 80% strength per prospettiva
+    perspective_strength: 1.0    # 100% strength per prospettiva (Fishyscapes-like)
+    min_obj_size_px: 35          # Min object size in pixels (30-40 range)
     
     # Drivable region constraints
     use_drivable_regions: true

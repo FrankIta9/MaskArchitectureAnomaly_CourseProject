@@ -54,6 +54,8 @@ class OutlierExposureTransform(nn.Module):
         drivable_class_ids: Optional[list] = None,  # [0, 1] for road, sidewalk in Cityscapes
         # P0 Fix: Y position range for paste (biased towards bottom = on-road)
         paste_y_range: Tuple[float, float] = (0.65, 0.98),  # (min_ratio, max_ratio) of image height
+        # Min object size in pixels (to reduce resample attempts)
+        min_obj_size_px: int = 30,  # Minimum object size in pixels (width or height)
     ):
         """
         Args:
@@ -72,8 +74,9 @@ class OutlierExposureTransform(nn.Module):
             perspective_strength: Strength of perspective effect (0.0 = disabled, 1.0 = full effect) (default: 1.0)
             use_drivable_regions: If True, only place objects on drivable regions (road/sidewalk) (default: True)
             drivable_class_ids: List of train_id class IDs for drivable regions (default: [0, 1] for Cityscapes)
-            paste_y_range: Tuple (min_ratio, max_ratio) of image height for Y position (default: (0.55, 0.95))
+            paste_y_range: Tuple (min_ratio, max_ratio) of image height for Y position (default: (0.65, 0.98))
                            Ensures objects are placed in lower part of image (on-road proxy)
+            min_obj_size_px: Minimum object size in pixels (width or height) to reduce resample attempts (default: 30)
         """
         super().__init__()
         self.outlier_dataset = outlier_dataset
@@ -109,6 +112,9 @@ class OutlierExposureTransform(nn.Module):
         
         # P0 Fix: Y position range for paste (biased towards bottom = on-road)
         self.paste_y_range = paste_y_range
+        
+        # Min object size in pixels (to reduce resample attempts)
+        self.min_obj_size_px = min_obj_size_px
         
         # Task 5: Placement counters for debugging (indicative, not critical)
         # Note: These are reset at epoch start (not thread-safe with multi-worker)
@@ -290,7 +296,7 @@ class OutlierExposureTransform(nn.Module):
                 
                 # 2) Applica scala prospettica basata su y
                 scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                scale = max(self.min_scale, min(self.max_scale * 1.5, scale))  # Allow slightly larger for perspective
+                scale = max(self.min_scale, min(self.max_scale * 2.0, scale))  # Allow up to 2.0x for perspective (Fishyscapes-like)
                 
                 # 3) Ricalcola dimensioni con scale finale
                 obj_h_scaled = max(1, int(obj_h_orig * scale))
@@ -329,17 +335,26 @@ class OutlierExposureTransform(nn.Module):
                 # Accumulate paste_mask
                 cumulative_paste_mask = cumulative_paste_mask | paste_mask
             
-            # FIX 4: Check ood_ratio after all objects pasted
+            # FIX 4: Check ood_ratio and min object size after all objects pasted
             ood_ratio = cumulative_paste_mask.float().mean().item()
             
-            if ood_ratio >= OOD_RATIO_MIN:
+            # Check anche min object size (per ridurre resample)
+            ood_pixels = cumulative_paste_mask.sum().item()
+            min_obj_size_ok = ood_pixels >= (self.min_obj_size_px ** 2)  # Area minima
+            
+            if ood_ratio >= OOD_RATIO_MIN and min_obj_size_ok:
                 # Accept this paste
                 break
             else:
                 # LOG 3: Log resample attempt (only once)
                 if resample_attempt == 0 and not self._resample_warn_logged:
                     import logging
-                    logging.warning(f"⚠️ [OE] ood_ratio={ood_ratio:.6f} < {OOD_RATIO_MIN}, resample {resample_attempt + 1}/{MAX_RESAMPLE}")
+                    reason = []
+                    if ood_ratio < OOD_RATIO_MIN:
+                        reason.append(f"ood_ratio={ood_ratio:.6f} < {OOD_RATIO_MIN}")
+                    if not min_obj_size_ok:
+                        reason.append(f"obj_size={ood_pixels} < {self.min_obj_size_px**2}")
+                    logging.warning(f"⚠️ [OE] {' and '.join(reason)}, resample {resample_attempt + 1}/{MAX_RESAMPLE}")
                     self._resample_warn_logged = True
                 
                 # Restore original image for resample
@@ -414,8 +429,9 @@ class OutlierExposureTransform(nn.Module):
         # t in [0,1]: 0=top (far), 1=bottom (near)
         t = float(y) / max(1.0, float(h - 1))
 
-        min_factor = 0.70   # far -> smaller
-        max_factor = 1.50   # near -> larger
+        # Fishyscapes-like: più aggressivo per oggetti più credibili
+        min_factor = 0.60   # far -> smaller
+        max_factor = 2.00   # near -> larger (più aggressivo)
         perspective_factor = min_factor + (max_factor - min_factor) * t
 
         # apply strength

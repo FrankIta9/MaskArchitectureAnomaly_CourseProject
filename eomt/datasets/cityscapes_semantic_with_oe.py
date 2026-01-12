@@ -56,6 +56,7 @@ class CityscapesSemanticWithOE(LightningDataModule):
         # P0 Fix: Y position range and blending
         paste_y_range: Tuple[float, float] = (0.65, 0.98),
         blend_alpha: float = 1.0,  # 1.0 = dry paste (more stable), 0.8 for blending
+        min_obj_size_px: int = 30,  # Minimum object size in pixels (to reduce resample)
     ) -> None:
         """
         Args:
@@ -118,6 +119,7 @@ class CityscapesSemanticWithOE(LightningDataModule):
                     drivable_class_ids=drivable_class_ids,
                     paste_y_range=paste_y_range,
                     blend_alpha=blend_alpha,
+                    min_obj_size_px=min_obj_size_px,
                 )
                 print(f"Outlier Exposure enabled with {len(coco_dataset)} COCO objects")
             except Exception as e:
