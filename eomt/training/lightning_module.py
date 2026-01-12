@@ -340,6 +340,55 @@ class LightningModule(lightning.LightningModule):
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
         
+        # A1: OE Statistics - Quanto OE sta colpendo davvero
+        batch_has_ood = False
+        batch_n_ood_pixels = 0
+        batch_total_pixels = 0
+        batch_n_objects_pasted = 0  # Stima: numero di regioni connesse in ood_mask
+        
+        if targets and "ood_mask" in targets[0]:
+            for target in targets:
+                if "ood_mask" in target:
+                    ood_mask = target["ood_mask"]  # [H, W]
+                    h, w = ood_mask.shape
+                    ood_pixels = (ood_mask == 1)
+                    
+                    if ood_pixels.any():
+                        batch_has_ood = True
+                        n_ood = ood_pixels.sum().item()
+                        batch_n_ood_pixels += n_ood
+                        batch_total_pixels += h * w
+                        
+                        # Stima numero oggetti pasted: conta regioni connesse (approssimativo)
+                        # Usa connected components o semplicemente conta "blob" significativi
+                        ood_mask_np = ood_mask.cpu().numpy()
+                        try:
+                            from scipy import ndimage
+                            labeled, num_features = ndimage.label(ood_mask_np == 1)
+                            batch_n_objects_pasted += num_features
+                        except ImportError:
+                            # Fallback se scipy non disponibile: stima basata su area media
+                            if n_ood > 0:
+                                # Assumendo area media per oggetto ~1000 pixel
+                                batch_n_objects_pasted += max(1, n_ood // 1000)
+                        except Exception:
+                            # Fallback: stima basata su area media
+                            if n_ood > 0:
+                                # Assumendo area media per oggetto ~1000 pixel
+                                batch_n_objects_pasted += max(1, n_ood // 1000)
+        
+        # Log A1: OE statistics
+        paste_applied = 1.0 if batch_has_ood else 0.0
+        self.log("dbg/oe/paste_applied", paste_applied, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+        self.log("dbg/oe/n_ood_pixels", float(batch_n_ood_pixels), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+        
+        if batch_total_pixels > 0:
+            ood_ratio = batch_n_ood_pixels / batch_total_pixels
+            self.log("dbg/oe/ood_ratio", ood_ratio, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+        
+        if batch_n_objects_pasted > 0:
+            self.log("dbg/oe/n_objects_pasted", float(batch_n_objects_pasted), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+        
         # P0 - Problema #2: Sanity check normalizzazione (solo primi 3 batch)
         if batch_idx < 3:
             # Forward pass per ottenere x dopo /255.0 (prima della normalizzazione in EoMT)
@@ -490,18 +539,23 @@ class LightningModule(lightning.LightningModule):
                             energy_id = energy_valid[ood_mask_valid == 0]
                             energy_ood = energy_valid[ood_mask_valid == 1]
                             
-                            # Log pixel counts
+                            # Log pixel counts (A1: OE Statistics)
                             n_id_pixels = energy_id.numel()
                             n_ood_pixels = energy_ood.numel()
                             self.log("dbg/n_id_pixels", float(n_id_pixels), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                             self.log("dbg/n_ood_pixels", float(n_ood_pixels), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                            self.log("dbg/oe/n_ood_pixels", float(n_ood_pixels), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)  # A1: Duplicato per coerenza
                             
-                            # Log mean energies
+                            # A3: Log mean energies (separazione ID vs OOD)
                             if energy_id.numel() > 0:
                                 energy_id_mean = energy_id.mean().item()
                                 energy_id_std = energy_id.std().item()
+                                # Mantieni log legacy per compatibilità
                                 self.log("dbg/energy_id_mean", energy_id_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                 self.log("dbg/energy_id_std", energy_id_std, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                # A3: Log con prefisso dbg/energy/
+                                self.log("dbg/energy/id_mean", energy_id_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                self.log("dbg/energy/id_std", energy_id_std, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                 
                                 # Log percentili ogni 200 step
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
@@ -529,8 +583,12 @@ class LightningModule(lightning.LightningModule):
                             if energy_ood.numel() > 0:
                                 energy_ood_mean = energy_ood.mean().item()
                                 energy_ood_std = energy_ood.std().item()
+                                # Mantieni log legacy per compatibilità
                                 self.log("dbg/energy_ood_mean", energy_ood_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                 self.log("dbg/energy_ood_std", energy_ood_std, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                # A3: Log con prefisso dbg/energy/
+                                self.log("dbg/energy/ood_mean", energy_ood_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                self.log("dbg/energy/ood_std", energy_ood_std, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                 
                                 # Log percentili ogni 200 step
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
@@ -555,12 +613,15 @@ class LightningModule(lightning.LightningModule):
                                         energy_ood_values = energy_ood_values[indices]
                                     self._energy_ood_buffer.extend(energy_ood_values.tolist())
                             
-                            # Log energy separation
+                            # A3: Log energy separation
                             if energy_id.numel() > 0 and energy_ood.numel() > 0:
                                 energy_sep = energy_ood.mean() - energy_id.mean()
+                                # Mantieni log legacy per compatibilità
                                 self.log("dbg/energy_sep", energy_sep, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                # A3: Log con prefisso dbg/energy/
+                                self.log("dbg/energy/sep", energy_sep, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                 
-                                # Log energy loss components (loss_id, loss_ood, loss_total)
+                                # A2: Log energy loss components (loss_id, loss_ood, loss_total, weight, active)
                                 # Use same formula as EnergyOODLoss: L_id = ReLU(E_id - m_in), L_ood = ReLU(m_out - E_ood)
                                 if hasattr(self, 'criterion') and hasattr(self.criterion, 'energy_ood_loss'):
                                     try:
@@ -568,20 +629,25 @@ class LightningModule(lightning.LightningModule):
                                         m_in = base_loss.m_in
                                         m_out = base_loss.m_out
                                         
-                                        # Calculate loss components
+                                        # Calculate loss components (RAW, prima di weight)
                                         loss_id = F.relu(energy_id - m_in).mean()
                                         loss_ood = F.relu(m_out - energy_ood).mean()
-                                        loss_total = loss_id + loss_ood
+                                        loss_total_raw = loss_id + loss_ood
+                                        
+                                        # A2: Get current weight (dopo warmup)
+                                        current_weight = 0.0
+                                        if hasattr(self.criterion.energy_ood_loss, 'get_current_weight'):
+                                            current_weight = self.criterion.energy_ood_loss.get_current_weight()
                                         
                                         # Apply weight if available
                                         if hasattr(base_loss, 'weight'):
                                             loss_id_weighted = loss_id * base_loss.weight
                                             loss_ood_weighted = loss_ood * base_loss.weight
-                                            loss_total_weighted = loss_total * base_loss.weight
+                                            loss_total_weighted = loss_total_raw * base_loss.weight
                                         else:
                                             loss_id_weighted = loss_id
                                             loss_ood_weighted = loss_ood
-                                            loss_total_weighted = loss_total
+                                            loss_total_weighted = loss_total_raw
                                         
                                         # Apply warmup weight if available
                                         if hasattr(self.criterion.energy_ood_loss, 'get_current_weight'):
@@ -592,6 +658,16 @@ class LightningModule(lightning.LightningModule):
                                                 loss_ood_weighted = loss_ood_weighted * scale_factor
                                                 loss_total_weighted = loss_total_weighted * scale_factor
                                         
+                                        # A2: Log energy loss statistics
+                                        self.log("dbg/energy/weight", current_weight, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                        self.log("dbg/energy/loss_raw", loss_total_raw.item(), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                        self.log("dbg/energy/loss_weighted", loss_total_weighted.item(), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                        
+                                        # A2: active = 1 se loss_raw > 0 e n_ood_pixels > 0
+                                        energy_active = 1.0 if (loss_total_raw.item() > 0.0 and n_ood_pixels > 0) else 0.0
+                                        self.log("dbg/energy/active", energy_active, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                        
+                                        # Mantieni log legacy per compatibilità
                                         self.log("loss/energy_id", loss_id_weighted.item(), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                         self.log("loss/energy_ood", loss_ood_weighted.item(), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                         self.log("loss/energy_total", loss_total_weighted.item(), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
