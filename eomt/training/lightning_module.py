@@ -467,6 +467,81 @@ class LightningModule(lightning.LightningModule):
         ood_ratios_per_sample = []  # Per calcolare mean/p50
         y_norm_centers = []  # Per calcolare y_norm_center medio
         
+        # NEW: Detailed logging for first 100 batches (consistency core + paste reality check + OOD size stats)
+        if batch_idx < 100:
+            for sample_idx, target in enumerate(targets):
+                if sample_idx >= 2:  # Only log for sample 0 and 1
+                    break
+                
+                if "ood_mask" in target:
+                    ood_mask = target["ood_mask"]  # [H, W]
+                    h, w = ood_mask.shape
+                    ood_pixels = (ood_mask == 1)
+                    
+                    # 1. Consistency core
+                    ood_pixels_count = ood_pixels.sum().item()
+                    
+                    # bad = ((ood_mask==1) & (semseg!=255)).sum()
+                    bad = 0
+                    if "semseg" in target:
+                        semseg = target["semseg"]
+                        if semseg.shape != ood_mask.shape:
+                            semseg_rs = semseg.to(torch.float32)[None, None, ...]
+                            semseg_rs = F.interpolate(semseg_rs, size=(h, w), mode="nearest")
+                            semseg = semseg_rs[0, 0].to(semseg.dtype)
+                        bad = ((ood_mask == 1) & (semseg != 255)).sum().item()
+                    
+                    # pad = ((ood_mask==1) & (valid_mask==0)).sum()
+                    pad = 0
+                    if "valid_mask" in target:
+                        valid_mask = target["valid_mask"]
+                        if valid_mask.shape != ood_mask.shape:
+                            valid_mask_rs = valid_mask.to(torch.float32)[None, None, ...]
+                            valid_mask_rs = F.interpolate(valid_mask_rs, size=(h, w), mode="nearest")
+                            valid_mask = valid_mask_rs[0, 0].to(torch.bool)
+                        pad = ((ood_mask == 1) & (valid_mask == 0)).sum().item()
+                    
+                    # Log consistency core
+                    logging.info(
+                        f"📊 Consistency Core - Batch {batch_idx}, Sample {sample_idx}: "
+                        f"ood_pixels={ood_pixels_count}, bad={bad}, pad={pad} "
+                        f"(bad==0: {bad==0}, pad==0: {pad==0})"
+                    )
+                    
+                    # Warning if invariants violated
+                    if bad > 0:
+                        logging.warning(
+                            f"⚠️ CONSISTENCY CORE FAILED - Batch {batch_idx}, Sample {sample_idx}: "
+                            f"bad={bad} > 0! OOD pixels have semseg != 255"
+                        )
+                    if pad > 0:
+                        logging.warning(
+                            f"⚠️ CONSISTENCY CORE FAILED - Batch {batch_idx}, Sample {sample_idx}: "
+                            f"pad={pad} > 0! OOD pixels in padding region"
+                        )
+                    
+                    # 2. Paste reality check
+                    if "_oe_reality_check" in target:
+                        reality_check = target["_oe_reality_check"]
+                        attempted_ood = reality_check.get("attempted_ood", 0)
+                        pasted_ood = reality_check.get("pasted_ood", 0)
+                        skipped_write0 = reality_check.get("skipped_write0", 0)
+                        skipped_overlap = reality_check.get("skipped_overlap", 0)
+                        
+                        logging.info(
+                            f"📊 Paste Reality Check - Batch {batch_idx}, Sample {sample_idx}: "
+                            f"attempted_ood={attempted_ood}, pasted_ood={pasted_ood}, "
+                            f"skipped_write0={skipped_write0}, skipped_overlap={skipped_overlap}"
+                        )
+                        
+                        # Warning if attempted_ood is high but pasted_ood is low
+                        if attempted_ood > 0 and pasted_ood < attempted_ood * 0.5:
+                            logging.warning(
+                                f"⚠️ PASTE REALITY CHECK - Batch {batch_idx}, Sample {sample_idx}: "
+                                f"attempted_ood={attempted_ood} but pasted_ood={pasted_ood} is low! "
+                                f"skipped_write0={skipped_write0}, skipped_overlap={skipped_overlap}"
+                            )
+        
         if targets and "ood_mask" in targets[0]:
             for target in targets:
                 if "ood_mask" in target:
@@ -546,6 +621,25 @@ class LightningModule(lightning.LightningModule):
             if len(y_norm_centers) > 0:
                 y_norm_center_mean = float(np.mean(y_norm_centers))
                 self.log("dbg/oe/y_norm_center_mean", y_norm_center_mean, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+        
+        # 3. OOD size stats (primi 100 batch): p50/p90 di ood_ratio su batch con ood_pixels>0
+        if batch_idx < 100 and len(ood_ratios_per_sample) > 0:
+            ood_ratios_tensor = torch.tensor(ood_ratios_per_sample)
+            ood_ratio_p50 = torch_percentile(ood_ratios_tensor, 50)
+            ood_ratio_p90 = torch_percentile(ood_ratios_tensor, 90)
+            
+            logging.info(
+                f"📊 OOD Size Stats - Batch {batch_idx}: "
+                f"p50={ood_ratio_p50:.6f}, p90={ood_ratio_p90:.6f} "
+                f"(samples with ood_pixels>0: {len(ood_ratios_per_sample)})"
+            )
+            
+            # Warning if p50 < 0.002 (OE is practically "invisible")
+            if ood_ratio_p50 < 0.002:
+                logging.warning(
+                    f"⚠️ OOD SIZE STATS - Batch {batch_idx}: "
+                    f"p50={ood_ratio_p50:.6f} < 0.002! OE is practically 'invisible'"
+                )
         
         # Log A1: OE statistics
         paste_applied = 1.0 if batch_has_ood else 0.0

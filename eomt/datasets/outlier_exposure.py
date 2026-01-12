@@ -145,11 +145,18 @@ class OutlierExposureTransform(nn.Module):
         # Note: These are reset at epoch start (not thread-safe with multi-worker)
         self.drivable_placement_count = 0
         self.random_placement_count = 0
-        
+    
         # FIX 4: Debug counter for logging (first 2 batches only, ~4-6 samples)
         self._dbg_count = 0
         self._dbg_max_count = 6  # Limit to first ~2 batches (batch_size=2-3)
         self._resample_warn_logged = False  # Disabled: resample is silent (no logging)
+        
+        # Paste reality check counters (per sample, resettati in forward)
+        self._attempted_ood = 0
+        self._pasted_ood = 0
+        self._skipped_write0 = 0
+        self._skipped_overlap = 0
+        self._log_reality_check = True  # Always enabled, logging controlled in lightning_module
     
     def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor, str]:
         """
@@ -245,6 +252,8 @@ class OutlierExposureTransform(nn.Module):
                 # Skip if overlap exceeds threshold (to avoid corrupting labels)
                 # Con FIX 1 questo diventa quasi superfluo, ma mantienilo come safety
                 if overlap_ratio > self.max_overlap_ratio:
+                    if self._log_reality_check:
+                        self._skipped_overlap += 1
                     return img, target, paste_mask, False  # Skip this object
             
             # Clone image and target for modification
@@ -300,6 +309,8 @@ class OutlierExposureTransform(nn.Module):
                 
                 # Fail-fast: se write_mask è vuoto, skip questo oggetto
                 if write_mask.sum() == 0:
+                    if self._log_reality_check:
+                        self._skipped_write0 += 1
                     return img, target, paste_mask, False  # Skip oggetto (non ha scritto niente)
                 
                 # FIX 2: Usa patch locale invece di doppio indexing
@@ -357,6 +368,12 @@ class OutlierExposureTransform(nn.Module):
             Transformed image and target (with ood_mask added)
         """
         h, w = img.shape[-2:]
+        
+        # Reset paste reality check counters for this sample
+        self._attempted_ood = 0
+        self._pasted_ood = 0
+        self._skipped_write0 = 0
+        self._skipped_overlap = 0
         
         # Initialize ood_mask: 0 = ID, 1 = OOD, 255 = ignore (opzionale)
         ood_mask = torch.zeros((h, w), dtype=torch.uint8, device=img.device)
@@ -430,6 +447,9 @@ class OutlierExposureTransform(nn.Module):
                     is_id_paste = True
                 elif do_ood_paste:
                     is_id_paste = False
+                    # Count attempted OOD paste
+                    if self._log_reality_check:
+                        self._attempted_ood += 1
                 else:
                     continue  # Should not happen, but safety check
                 
@@ -464,15 +484,15 @@ class OutlierExposureTransform(nn.Module):
                         if retry_count >= max_retries:
                             continue  # Skip this object if no non-mappable category found
                 
-                # Select base scale using weighted distribution if enabled, otherwise uniform
-                if self.use_weighted_scale:
-                    base_scale = self._sample_weighted_scale()
-                else:
-                    base_scale = random.uniform(self.min_scale, self.max_scale)
-                
+            # Select base scale using weighted distribution if enabled, otherwise uniform
+            if self.use_weighted_scale:
+                base_scale = self._sample_weighted_scale()
+            else:
+                base_scale = random.uniform(self.min_scale, self.max_scale)
+            
                 # P0 Fix: Ordine ottimizzato - se drivable_mask disponibile, scegli (x,y) PRIMA, poi calcola scale
                 # Se drivable_mask non disponibile, usa ordine classico (y -> scale -> x)
-                if drivable_mask is not None and drivable_mask.any():
+            if drivable_mask is not None and drivable_mask.any():
                     # ORDINE NUOVO: prima scegli (x,y) drivable, poi calcola scale basato su y
                     # Usa dimensioni iniziali stimate per trovare posizione valida
                     obj_h_est = max(1, int(obj_h_orig * base_scale))
@@ -505,13 +525,13 @@ class OutlierExposureTransform(nn.Module):
                             position2 = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
                             if position2 is not None:
                                 x, y = position2
-                            else:
+                else:
                                 # Fallback safe: random solo in valid+bottom
                                 y_min = int(0.7 * h)
                                 x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
                                 if x is None:
                                     continue  # Skip this object
-                        else:
+            else:
                             # Verifica che l'oggetto ci stia ancora nella posizione scelta
                             if x + obj_w_scaled > w or y + obj_h_scaled > h:
                                 # Se non ci sta, clamp x,y
@@ -542,11 +562,11 @@ class OutlierExposureTransform(nn.Module):
                     scale = self._apply_perspective_aware_scale(base_scale, y, h)
                     scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
                     
-                    obj_h_scaled = max(1, int(obj_h_orig * scale))
-                    obj_w_scaled = max(1, int(obj_w_orig * scale))
-                    obj_h_scaled = min(obj_h_scaled, h)
-                    obj_w_scaled = min(obj_w_scaled, w)
-                    
+            obj_h_scaled = max(1, int(obj_h_orig * scale))
+            obj_w_scaled = max(1, int(obj_w_orig * scale))
+            obj_h_scaled = min(obj_h_scaled, h)
+            obj_w_scaled = min(obj_w_scaled, w)
+            
                     # Fix: Usa fallback_safe_position anche qui per evitare padding
                     x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
                     if x is None:
@@ -576,6 +596,12 @@ class OutlierExposureTransform(nn.Module):
                 if category_name not in COCO_TO_CS_TRAINID:
                     # Only accumulate OOD paste_mask
                     cumulative_paste_mask = cumulative_paste_mask | paste_mask
+                    # Count successful OOD paste
+                    if self._log_reality_check and success:
+                        self._pasted_ood += 1
+                    # Count successful OOD paste
+                    if self._log_reality_check and success:
+                        self._pasted_ood += 1
             
             # FIX 4: Check ood_ratio and min object size after all objects pasted
             ood_ratio = cumulative_paste_mask.float().mean().item()
@@ -587,7 +613,7 @@ class OutlierExposureTransform(nn.Module):
                 # Paste troppo grande, resample (silent)
                 if resample_attempt < MAX_RESAMPLE - 1:
                     continue  # Resample
-                else:
+            else:
                     # After max attempts, accept silently
                     break
             
@@ -617,6 +643,15 @@ class OutlierExposureTransform(nn.Module):
         
         # Add ood_mask to target
         target["ood_mask"] = ood_mask
+        
+        # Store paste reality check counters in target for logging in lightning_module
+        if self._log_reality_check:
+            target["_oe_reality_check"] = {
+                "attempted_ood": self._attempted_ood,
+                "pasted_ood": self._pasted_ood,
+                "skipped_write0": self._skipped_write0,
+                "skipped_overlap": self._skipped_overlap,
+            }
         
         # DEBUG: Assert/warn per invarianti (solo primi 200 batch)
         if not hasattr(self, '_debug_batch_count'):
@@ -705,7 +740,7 @@ class OutlierExposureTransform(nn.Module):
         """
         if not self.use_perspective_aware or self.perspective_strength <= 0.0:
             return base_scale
-
+        
         # t in [0,1]: 0=top (far), 1=bottom (near)
         t = float(y) / max(1.0, float(h - 1))
 
@@ -846,7 +881,7 @@ class OutlierExposureTransform(nn.Module):
                 if y < y_low_relaxed:
                     continue
                 if y <= max_y and x <= max_x:
-                    valid_positions.append([y, x])
+                valid_positions.append([y, x])
         
         if len(valid_positions) == 0:
             return None
