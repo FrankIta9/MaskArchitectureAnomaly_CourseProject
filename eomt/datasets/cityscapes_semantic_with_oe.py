@@ -196,17 +196,85 @@ class CityscapesSemanticWithOE(LightningDataModule):
             **cityscapes_dataset_kwargs,
         )
         
-        # Log per verificare che Cityscapes sia caricato correttamente
-        print(f"✅ Cityscapes dataset loaded:")
-        print(f"   Train samples: {len(self.cityscapes_train_dataset)}")
-        print(f"   Val samples: {len(self.cityscapes_val_dataset)}")
-        print(f"   Path: {self.path}")
-        print(f"   Num classes: {self.num_classes}")
+        # Log dettagliato per verificare che Cityscapes sia caricato correttamente
+        print("\n" + "="*70)
+        print("🔍 CITYSCAPES DATASET VERIFICATION")
+        print("="*70)
+        
+        # Verifica base
+        train_len = len(self.cityscapes_train_dataset)
+        val_len = len(self.cityscapes_val_dataset)
+        print(f"✅ Dataset loaded successfully:")
+        print(f"   📁 Path: {self.path}")
+        print(f"   📊 Train samples: {train_len}")
+        print(f"   📊 Val samples: {val_len}")
+        print(f"   🎯 Num classes: {self.num_classes}")
+        
+        # Verifica che i dataset non siano vuoti
+        if train_len == 0:
+            print("   ⚠️  WARNING: Train dataset is EMPTY!")
+        if val_len == 0:
+            print("   ⚠️  WARNING: Val dataset is EMPTY!")
+        
+        # Verifica Transforms
         if hasattr(self, 'transforms') and self.transforms is not None:
-            print(f"   Transforms: {type(self.transforms).__name__}")
+            print(f"   🔄 Transforms: {type(self.transforms).__name__}")
             if hasattr(self.transforms, 'outlier_exposure_transform') and self.transforms.outlier_exposure_transform is not None:
-                print(f"   ✅ Outlier Exposure enabled")
-
+                print(f"   ✅ Outlier Exposure: ENABLED")
+            else:
+                print(f"   ℹ️  Outlier Exposure: DISABLED")
+        
+        # Test di un sample per verificare che semseg sia presente
+        try:
+            if train_len > 0:
+                sample = self.cityscapes_train_dataset[0]
+                img = sample[0]
+                target = sample[1]
+                
+                print(f"\n✅ Sample verification (train[0]):")
+                print(f"   🖼️  Image shape: {img.shape}")
+                print(f"   📦 Target keys: {list(target.keys())}")
+                
+                # Verifica semseg
+                if "semseg" in target:
+                    semseg = target["semseg"]
+                    print(f"   ✅ semseg present: shape={semseg.shape}, dtype={semseg.dtype}")
+                    unique_values = torch.unique(semseg)
+                    num_ignore = (semseg == 255).sum().item()
+                    num_valid = (semseg != 255).sum().item()
+                    print(f"      - Unique values: {len(unique_values)} (min={unique_values.min().item()}, max={unique_values.max().item()})")
+                    print(f"      - Valid pixels (semseg != 255): {num_valid}")
+                    print(f"      - Ignore pixels (semseg == 255): {num_ignore}")
+                    
+                    # Verifica che ci siano classi valide
+                    valid_classes = unique_values[unique_values != 255]
+                    if len(valid_classes) > 0:
+                        print(f"      - Valid classes present: {valid_classes.tolist()[:10]}{'...' if len(valid_classes) > 10 else ''}")
+                    else:
+                        print(f"      ⚠️  WARNING: No valid classes found in semseg!")
+                else:
+                    print(f"   ❌ ERROR: semseg NOT found in target!")
+                
+                # Verifica ood_mask (se presente)
+                if "ood_mask" in target:
+                    ood_mask = target["ood_mask"]
+                    ood_pixels = (ood_mask == 1).sum().item()
+                    print(f"   ✅ ood_mask present: shape={ood_mask.shape}, dtype={ood_mask.dtype}")
+                    print(f"      - OOD pixels: {ood_pixels}")
+                
+                # Verifica valid_mask (se presente)
+                if "valid_mask" in target:
+                    valid_mask = target["valid_mask"]
+                    valid_pixels = valid_mask.sum().item()
+                    print(f"   ✅ valid_mask present: shape={valid_mask.shape}, dtype={valid_mask.dtype}")
+                    print(f"      - Valid pixels: {valid_pixels}/{valid_mask.numel()}")
+        except Exception as e:
+            print(f"   ❌ ERROR: Failed to load sample: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print("="*70 + "\n")
+        
         return self
 
     def train_dataloader(self):
