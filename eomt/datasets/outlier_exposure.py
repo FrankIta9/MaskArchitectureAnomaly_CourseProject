@@ -373,6 +373,23 @@ class OutlierExposureTransform(nn.Module):
             # FIX 4: Check ood_ratio and min object size after all objects pasted
             ood_ratio = cumulative_paste_mask.float().mean().item()
             
+            # Config finale: cap "paste troppo grande" - ood_ratio_max = 0.05
+            OOD_RATIO_MAX = 0.05
+            if ood_ratio > OOD_RATIO_MAX:
+                # Paste troppo grande, resample
+                if resample_attempt == 0 and not self._resample_warn_logged:
+                    import logging
+                    logging.warning(f"⚠️ [OE] ood_ratio={ood_ratio:.6f} > {OOD_RATIO_MAX}, resample {resample_attempt + 1}/{MAX_RESAMPLE}")
+                    self._resample_warn_logged = True
+                
+                if resample_attempt < MAX_RESAMPLE - 1:
+                    continue  # Resample
+                else:
+                    # After max attempts, accept but log warning
+                    import logging
+                    logging.warning(f"⚠️ [OE] ood_ratio={ood_ratio:.6f} still > {OOD_RATIO_MAX} after {MAX_RESAMPLE} attempts, accepting")
+                    break
+            
             # Check anche min object size (per ridurre resample)
             ood_pixels = cumulative_paste_mask.sum().item()
             min_obj_size_ok = ood_pixels >= (self.min_obj_size_px ** 2)  # Area minima
@@ -547,7 +564,7 @@ class OutlierExposureTransform(nn.Module):
         return drivable_mask if drivable_mask.any() else None
     
     def _sample_drivable_position(
-        self, drivable_mask: torch.Tensor, obj_h: int, obj_w: int, h: int, w: int, max_attempts: int = 250
+        self, drivable_mask: torch.Tensor, obj_h: int, obj_w: int, h: int, w: int, max_attempts: int = 500
     ) -> Optional[Tuple[int, int]]:
         """
         Sample a random position within drivable regions that can fit the object.
@@ -573,8 +590,12 @@ class OutlierExposureTransform(nn.Module):
         # Pre-filter valid positions to ensure top-left fits (y<=h-obj_h, x<=w-obj_w)
         all_valid_positions = torch.nonzero(drivable_mask, as_tuple=False)  # Shape: (N, 2) with [y, x]
         
-        # NEW: force bottom placement (use same lower bound as paste_y_range)
-        y_low = int(self.paste_y_range[0] * h)  # e.g. 0.70*h
+        # Config finale: y_low mixture - 70% a 0.70H, 30% a 0.55H
+        if random.random() < 0.7:
+            y_low = int(0.70 * h)  # 70% dei casi: molto bottom-biased
+        else:
+            y_low = int(0.55 * h)  # 30% dei casi: leggermente più alto ma sempre bottom
+        
         max_y = h - obj_h
         max_x = w - obj_w
         
@@ -591,7 +612,7 @@ class OutlierExposureTransform(nn.Module):
         # Fallback intelligente: se troppo restrittivo, rilassa y_low ma sempre bottom-ish
         if len(valid_positions) == 0:
             # fallback: relax y_low to a lower threshold but still bottom-ish
-            y_low_relaxed = int(0.60 * h)
+            y_low_relaxed = int(0.50 * h)
             for pos in all_valid_positions:
                 y, x = pos.tolist()
                 if y < y_low_relaxed:
@@ -615,11 +636,11 @@ class OutlierExposureTransform(nn.Module):
             y_end = y + obj_h
             
             if x >= 0 and y >= 0 and x_end <= w and y_end <= h:
-                # Task 5: Check if the object region is mostly drivable (at least 60%, reduced from 80%)
+                # Config finale: drivable_percentage >= 0.5 (più permissivo)
                 region_mask = drivable_mask[y:y_end, x:x_end]
                 if region_mask.numel() > 0:
                     drivable_percentage = region_mask.sum().float() / region_mask.numel()
-                    if drivable_percentage >= 0.6:  # Task 5: Reduced from 0.8 to 0.6 (allow 0.6-0.7 range)
+                    if drivable_percentage >= 0.5:  # Config finale: 0.5 (più permissivo)
                         return (x, y)
         
         # Fallback: return None, will use random position in forward
