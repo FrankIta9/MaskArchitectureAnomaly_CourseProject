@@ -658,7 +658,7 @@ class OutlierExposureTransform(nn.Module):
                                     if self._log_reality_check:
                                         self._skipped_no_position += 1
                                     continue  # Skip this object
-            else:
+                        else:
                             # Verifica che l'oggetto ci stia ancora nella posizione scelta
                             if x + obj_w_scaled > w or y + obj_h_scaled > h:
                                 # Se non ci sta, clamp x,y
