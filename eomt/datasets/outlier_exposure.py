@@ -551,27 +551,27 @@ class OutlierExposureTransform(nn.Module):
                         obj_w_scaled = max(1, int(obj_w_orig * scale))
                         obj_h_scaled = min(obj_h_scaled, h)
                         obj_w_scaled = min(obj_w_scaled, w)
-                else:
-                    # ORDINE CLASSICO: y -> scale -> x (quando non c'è drivable_mask)
-                    # Fix: Assicura che anche qui non finisca nel padding
-                    y_min_ratio, y_max_ratio = self.paste_y_range
-                    y_min = int(y_min_ratio * h)
-                    y_max = int(y_max_ratio * h)
-                    y = random.randint(y_min, y_max)
-                    
-                    scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                    scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
-                    
-            obj_h_scaled = max(1, int(obj_h_orig * scale))
-            obj_w_scaled = max(1, int(obj_w_orig * scale))
-            obj_h_scaled = min(obj_h_scaled, h)
-            obj_w_scaled = min(obj_w_scaled, w)
-            
-                    # Fix: Usa fallback_safe_position anche qui per evitare padding
-                    x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
-                    if x is None:
-                        continue  # Skip this object if no valid position
-                    self.random_placement_count += 1
+            else:
+                # ORDINE CLASSICO: y -> scale -> x (quando non c'è drivable_mask)
+                # Fix: Assicura che anche qui non finisca nel padding
+                y_min_ratio, y_max_ratio = self.paste_y_range
+                y_min = int(y_min_ratio * h)
+                y_max = int(y_max_ratio * h)
+                y = random.randint(y_min, y_max)
+                
+                scale = self._apply_perspective_aware_scale(base_scale, y, h)
+                scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
+                
+                obj_h_scaled = max(1, int(obj_h_orig * scale))
+                obj_w_scaled = max(1, int(obj_w_orig * scale))
+                obj_h_scaled = min(obj_h_scaled, h)
+                obj_w_scaled = min(obj_w_scaled, w)
+                
+                # Fix: Usa fallback_safe_position anche qui per evitare padding
+                x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
+                if x is None:
+                    continue  # Skip this object if no valid position
+                self.random_placement_count += 1
                 
                 # Paste object and get paste_mask (with category_name for ID/OOD distinction)
                 img, target, paste_mask, success = self._paste_object(
@@ -881,7 +881,7 @@ class OutlierExposureTransform(nn.Module):
                 if y < y_low_relaxed:
                     continue
                 if y <= max_y and x <= max_x:
-                valid_positions.append([y, x])
+                    valid_positions.append([y, x])
         
         if len(valid_positions) == 0:
             return None
