@@ -636,15 +636,17 @@ class LightningModule(lightning.LightningModule):
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_id_buffer)
                                 if not self._energy_margins_computed and current_step < self._energy_margin_calculation_steps:
                                     # Accumulate individual values (sample to avoid memory issues)
-                                    energy_id_values = energy_id.detach().cpu().numpy().flatten()  # Flatten to 1D array
-                                    # Sample up to 1000 values per batch to avoid memory explosion
-                                    # Fix: k = min(1000, len(energy_id_values)) per evitare crash quando len < 1000
-                                    k = min(1000, len(energy_id_values))
+                                    energy_id_values = energy_id.detach().cpu().flatten()  # Flatten to 1D tensor
+                                    N = energy_id_values.numel()
+                                    k = min(1000, N)
                                     if k > 0:
-                                        if len(energy_id_values) > 1000:
-                                            indices = np.random.choice(len(energy_id_values), size=k, replace=False)
-                                            energy_id_values = energy_id_values[indices]
-                                        self._energy_id_buffer.extend(energy_id_values.tolist())
+                                        if N >= k:
+                                            idx = torch.randperm(N, device=energy_id_values.device)[:k]
+                                        else:
+                                            # With replacement if N < k
+                                            idx = torch.randint(0, N, (k,), device=energy_id_values.device)
+                                        sample = energy_id_values[idx]
+                                        self._energy_id_buffer.extend(sample.tolist())
                             
                             if energy_ood.numel() > 0:
                                 energy_ood_mean = energy_ood.mean().item()
@@ -672,15 +674,17 @@ class LightningModule(lightning.LightningModule):
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_ood_buffer)
                                 if not self._energy_margins_computed and current_step < self._energy_margin_calculation_steps:
                                     # Accumulate individual values (sample to avoid memory issues)
-                                    energy_ood_values = energy_ood.detach().cpu().numpy().flatten()  # Flatten to 1D array
-                                    # Sample up to 1000 values per batch to avoid memory explosion
-                                    # Fix: k = min(1000, len(energy_ood_values)) per evitare crash quando len < 1000
-                                    k = min(1000, len(energy_ood_values))
+                                    energy_ood_values = energy_ood.detach().cpu().flatten()  # Flatten to 1D tensor
+                                    N = energy_ood_values.numel()
+                                    k = min(1000, N)
                                     if k > 0:
-                                        if len(energy_ood_values) > 1000:
-                                            indices = np.random.choice(len(energy_ood_values), size=k, replace=False)
-                                            energy_ood_values = energy_ood_values[indices]
-                                        self._energy_ood_buffer.extend(energy_ood_values.tolist())
+                                        if N >= k:
+                                            idx = torch.randperm(N, device=energy_ood_values.device)[:k]
+                                        else:
+                                            # With replacement if N < k
+                                            idx = torch.randint(0, N, (k,), device=energy_ood_values.device)
+                                        sample = energy_ood_values[idx]
+                                        self._energy_ood_buffer.extend(sample.tolist())
                             
                             # A3: Log energy separation
                             if energy_id.numel() > 0 and energy_ood.numel() > 0:
