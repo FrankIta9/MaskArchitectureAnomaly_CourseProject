@@ -133,26 +133,57 @@ class LightningModule(lightning.LightningModule):
             ckpt = self._load_ckpt(ckpt_path, load_ckpt_class_head)
             incompatible_keys = self.load_state_dict(ckpt, strict=False)
             
-            # Verifica checkpoint: stampa missing/unexpected keys
-            if incompatible_keys.missing_keys:
-                logging.warning(f"⚠️ Missing keys in checkpoint (not loaded): {len(incompatible_keys.missing_keys)} keys")
-                # Mostra solo primi 10 per non intasare il log
-                for k in incompatible_keys.missing_keys[:10]:
-                    logging.warning(f"  - {k}")
-                if len(incompatible_keys.missing_keys) > 10:
-                    logging.warning(f"  ... and {len(incompatible_keys.missing_keys) - 10} more")
-            else:
-                logging.info("✅ All expected keys found in checkpoint")
+            # Verifica checkpoint: stampa missing/unexpected keys e verifica "parto da 81.7"
+            missing_keys = incompatible_keys.missing_keys
+            unexpected_keys = incompatible_keys.unexpected_keys
             
-            if incompatible_keys.unexpected_keys:
-                logging.warning(f"⚠️ Unexpected keys in checkpoint (ignored): {len(incompatible_keys.unexpected_keys)} keys")
-                # Mostra solo primi 10 per non intasare il log
-                for k in incompatible_keys.unexpected_keys[:10]:
+            # Filtra missing_keys critici vs non critici
+            critical_missing = [k for k in missing_keys if not any(x in k for x in ["buffer", "metric", "criterion.empty_weight", "_energy_", "_ood_mask_print_count"])]
+            non_critical_missing = [k for k in missing_keys if k not in critical_missing]
+            
+            if critical_missing:
+                logging.error(f"❌ CRITICAL Missing keys in checkpoint (not loaded): {len(critical_missing)} keys")
+                for k in critical_missing[:20]:
+                    logging.error(f"  - {k}")
+                if len(critical_missing) > 20:
+                    logging.error(f"  ... and {len(critical_missing) - 20} more")
+                logging.error("⚠️ NON stai partendo dal modello corretto (81.7 mIoU)!")
+            elif missing_keys:
+                logging.warning(f"⚠️ Non-critical missing keys: {len(non_critical_missing)} keys (buffer/metrics, ok)")
+                for k in non_critical_missing[:10]:
                     logging.warning(f"  - {k}")
-                if len(incompatible_keys.unexpected_keys) > 10:
-                    logging.warning(f"  ... and {len(incompatible_keys.unexpected_keys) - 10} more")
+                if len(non_critical_missing) > 10:
+                    logging.warning(f"  ... and {len(non_critical_missing) - 10} more")
+                logging.info("✅ Missing keys sono solo non-critici (buffer/metrics) - OK per partire da 81.7")
             else:
-                logging.info("✅ No unexpected keys in checkpoint")
+                logging.info("✅ All expected keys found in checkpoint - OK per partire da 81.7")
+            
+            # Unexpected keys: idealmente vuoti, altrimenti non devono essere pezzi grossi
+            critical_unexpected = [k for k in unexpected_keys if any(x in k for x in ["network.", "encoder.", "backbone.", "class_head.", "mask_head."])]
+            non_critical_unexpected = [k for k in unexpected_keys if k not in critical_unexpected]
+            
+            if critical_unexpected:
+                logging.error(f"❌ CRITICAL Unexpected keys in checkpoint (ignored): {len(critical_unexpected)} keys")
+                for k in critical_unexpected[:20]:
+                    logging.error(f"  - {k}")
+                if len(critical_unexpected) > 20:
+                    logging.error(f"  ... and {len(critical_unexpected) - 20} more")
+                logging.error("⚠️ Checkpoint contiene pezzi grossi non usati - verifica che sia il checkpoint corretto!")
+            elif unexpected_keys:
+                logging.warning(f"⚠️ Non-critical unexpected keys: {len(non_critical_unexpected)} keys")
+                for k in non_critical_unexpected[:10]:
+                    logging.warning(f"  - {k}")
+                if len(non_critical_unexpected) > 10:
+                    logging.warning(f"  ... and {len(non_critical_unexpected) - 10} more")
+                logging.info("✅ Unexpected keys sono solo non-critici - OK")
+            else:
+                logging.info("✅ No unexpected keys in checkpoint - OK")
+            
+            # Summary finale
+            if not critical_missing and not critical_unexpected:
+                logging.info("✅ CHECKPOINT VERIFICATION PASSED: Parti dal modello corretto (81.7 mIoU)")
+            else:
+                logging.error("❌ CHECKPOINT VERIFICATION FAILED: Verifica che stai usando il checkpoint corretto!")
             
             # Check if class_head weights were loaded correctly
             if load_ckpt_class_head:
@@ -396,6 +427,33 @@ class LightningModule(lightning.LightningModule):
                     ood_mask = target["ood_mask"]  # [H, W]
                     h, w = ood_mask.shape
                     ood_pixels = (ood_mask == 1)
+                    
+                    # A) Valid_mask validation: pad_ood_ratio (primi 50 batch)
+                    if batch_idx < 50 and "valid_mask" in target:
+                        valid_mask = target["valid_mask"]  # [H, W] bool
+                        # Assicura stessa shape (gestisce resize mismatch)
+                        if valid_mask.shape != ood_mask.shape:
+                            valid_mask_rs = valid_mask.to(torch.float32)[None, None, ...]
+                            valid_mask_rs = F.interpolate(valid_mask_rs, size=(h, w), mode="nearest")
+                            valid_mask = valid_mask_rs[0, 0].to(torch.bool)
+                        
+                        # pad_ood_pixels = OOD nel padding (valid_mask==0)
+                        pad_ood_pixels = (ood_mask == 1) & (valid_mask == 0)
+                        pad_ood_count = pad_ood_pixels.sum().item()
+                        ood_count = (ood_mask == 1).sum().item()
+                        pad_ood_ratio = pad_ood_count / max(1, ood_count)
+                        
+                        # Log per batch (anche se 0, per dimostrare che è sempre 0)
+                        self.log("dbg/valid/pad_ood_ratio", pad_ood_ratio, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+                        self.log("dbg/valid/pad_ood_pixels", float(pad_ood_count), on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+                        
+                        # Warning se pad_ood_ratio > 0 (non dovrebbe mai succedere)
+                        if pad_ood_ratio > 0.0:
+                            logging.warning(
+                                f"⚠️ VALID_MASK CHECK FAILED - Batch {batch_idx}: pad_ood_ratio={pad_ood_ratio:.6f} > 0! "
+                                f"pad_ood_pixels={pad_ood_count}, ood_pixels={ood_count}. "
+                                f"Questo indica un path che buca la constraint (probabilmente resize mismatch)."
+                            )
                     
                     if ood_pixels.any():
                         batch_has_ood = True
