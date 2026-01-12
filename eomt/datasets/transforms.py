@@ -134,12 +134,16 @@ class Transforms(nn.Module):
         pad_w = max(0, self.img_size[-1] - img.shape[-1])
         padding = [0, 0, pad_w, pad_h]
 
-        img = F.pad(img, padding)
-        target["masks"] = F.pad(target["masks"], padding)
+        # Pad img con 0 (nero)
+        img = F.pad(img, padding, fill=0)
         
-        # Pad anche semseg se presente (pixel-wise, usa NEAREST)
+        # Pad masks con 0 (va bene per boolean/uint8)
+        target["masks"] = F.pad(target["masks"], padding, fill=0)
+        
+        # Pad semseg con 255 (IGNORE) - questo assicura che padding sia sempre IGNORE
         if "semseg" in target:
-            target["semseg"] = F.pad(target["semseg"], padding)
+            semseg = target["semseg"]
+            target["semseg"] = F.pad(semseg, padding, fill=255)
 
         return img, target
 
