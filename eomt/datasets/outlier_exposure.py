@@ -523,6 +523,14 @@ class OutlierExposureTransform(nn.Module):
                         x, y = self._fallback_safe_position(target, obj_h_est, obj_w_est, h, w, y_min)
                         if x is None:
                             continue  # Skip this object if no valid position
+                        # Calcola scale anche per fallback
+                        scale = self._apply_perspective_aware_scale(base_scale, y, h)
+                        scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
+                        # Ricalcola dimensioni con scale finale per fallback
+                        obj_h_scaled = max(1, int(obj_h_orig * scale))
+                        obj_w_scaled = max(1, int(obj_w_orig * scale))
+                        obj_h_scaled = min(obj_h_scaled, h)
+                        obj_w_scaled = min(obj_w_scaled, w)
                 else:
                     # ORDINE CLASSICO: y -> scale -> x (quando non c'è drivable_mask)
                     # Fix: Assicura che anche qui non finisca nel padding
