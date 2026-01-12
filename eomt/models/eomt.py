@@ -148,7 +148,12 @@ class EoMT(nn.Module):
         return attn_mask
 
     def forward(self, x: torch.Tensor):
-        x = (x - self.encoder.pixel_mean) / self.encoder.pixel_std
+        # P0 - Problema #2: Assicura dtype/device matching per normalizzazione (AMP-safe)
+        # I buffer pixel_mean/std sono registrati come float32, ma x potrebbe essere float16/bfloat16 in mixed precision
+        # type_as(x) converte automaticamente dtype e mantiene device, evitando cast impliciti
+        pixel_mean = self.encoder.pixel_mean.type_as(x)
+        pixel_std = self.encoder.pixel_std.type_as(x)
+        x = (x - pixel_mean) / pixel_std
 
         rope = None
         if hasattr(self.encoder.backbone, "rope_embeddings"):
