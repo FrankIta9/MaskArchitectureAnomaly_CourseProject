@@ -271,7 +271,32 @@ class OutlierExposureTransform(nn.Module):
 
         return allowed if allowed.any() else None
 
+    def _rebuild_masks_from_semseg(self, target: Dict[str, Any]) -> None:
+        """Rebuild semantic masks/labels from semseg to keep shapes consistent.
+
+        This keeps the pipeline stable when transforms or pastes change semseg.
+        """
+        if "semseg" not in target or not torch.is_tensor(target["semseg"]):
+            return
+
+        semseg = target["semseg"]
+        ignore = 255
+        labels = torch.unique(semseg)
+        labels = labels[labels != ignore]
+
+        if labels.numel() == 0:
+            target["masks"] = torch.zeros((0, semseg.shape[0], semseg.shape[1]), dtype=torch.bool, device=semseg.device)
+            target["labels"] = torch.zeros((0,), dtype=torch.long, device=semseg.device)
+            target["is_crowd"] = torch.zeros((0,), dtype=torch.bool, device=semseg.device)
+            return
+
+        masks = torch.stack([(semseg == int(l.item())) for l in labels], dim=0).to(torch.bool)
+        target["masks"] = masks
+        target["labels"] = labels.to(dtype=torch.long)
+        target["is_crowd"] = torch.zeros((labels.numel(),), dtype=torch.bool, device=semseg.device)
+
     def _sample_position_from_mask(
+
         self,
         allowed_mask: torch.Tensor,
         obj_h: int,
@@ -543,42 +568,14 @@ class OutlierExposureTransform(nn.Module):
                     cs_trainid = int(COCO_TO_CS_TRAINID[category_name])
                     semseg_patch[write_mask] = cs_trainid
                     target["semseg"][y:y_end, x:x_end] = semseg_patch
-
-                    # Update masks/labels to include the pasted region
-                    if "masks" in target and "labels" in target and torch.is_tensor(target["masks"]):
-                        labels = target["labels"]
-                        if not torch.is_tensor(labels):
-                            labels = torch.tensor(labels, dtype=torch.long, device=target["masks"].device)
-                        else:
-                            labels = labels.to(dtype=torch.long)
-
-                        match = (labels == cs_trainid).nonzero(as_tuple=False)
-                        if match.numel() > 0:
-                            class_idx = int(match[0].item())
-                            masks_patch = target["masks"][class_idx, y:y_end, x:x_end]
-                            masks_patch[write_mask] = True
-                            target["masks"][class_idx, y:y_end, x:x_end] = masks_patch
-                        else:
-                            new_mask = torch.zeros((h, w), dtype=torch.bool, device=target["masks"].device)
-                            new_mask[y:y_end, x:x_end] = write_mask
-                            target["masks"] = torch.cat([target["masks"].to(torch.bool), new_mask.unsqueeze(0)], dim=0)
-                            target["labels"] = torch.cat([labels, torch.tensor([cs_trainid], device=labels.device, dtype=labels.dtype)], dim=0)
-                            if "is_crowd" in target and torch.is_tensor(target["is_crowd"]):
-                                target["is_crowd"] = torch.cat(
-                                    [target["is_crowd"].to(torch.bool), torch.zeros(1, device=target["is_crowd"].device, dtype=torch.bool)],
-                                    dim=0,
-                                )
-
                 else:
                     # OOD AUGMENTATION: Non-mappable category → outlier exposure
-                    # Mark these pixels as IGNORE in semseg and remove them from class masks
+                    # Mark these pixels as IGNORE in semseg
                     semseg_patch[write_mask] = 255
                     target["semseg"][y:y_end, x:x_end] = semseg_patch
 
-                    if "masks" in target and torch.is_tensor(target["masks"]) and target["masks"].ndim == 3:
-                        masks_patch_all = target["masks"][:, y:y_end, x:x_end]
-                        masks_patch_all[:, write_mask] = False
-                        target["masks"][:, y:y_end, x:x_end] = masks_patch_all
+                # Rebuild masks/labels from semseg (shape-safe, avoids ID-paste crashes)
+                self._rebuild_masks_from_semseg(target)
             
             # FIX 3: paste_mask deve essere esattamente write_mask (non obj_mask_resized)
             # Questo garantisce che paste_mask == pixel dove abbiamo scritto davvero
@@ -905,18 +902,21 @@ class OutlierExposureTransform(nn.Module):
         # Add ood_mask to target
         target["ood_mask"] = ood_mask
         
-        # 2) Hook immediato: dopo il paste, assert che l'ood_mask sia > 0
+        # Rate-limited debug hook: after paste (avoid spamming)
         s = int(target["ood_mask"].sum().item())
         if s == 0:
-            print("❌ OOD_MASK still zero right after paste!")
-            print(f"   paste_mask any: {bool(cumulative_paste_mask.any().item())}")
-            print(f"   paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
-            print(f"   ood_mask dtype: {target['ood_mask'].dtype}")
-            print(f"   ood_mask unique: {torch.unique(target['ood_mask']).tolist()[:10]}")
-            print(f"   ood_mask shape: {target['ood_mask'].shape}")
-            print(f"   cumulative_paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
-            print(f"   cumulative_paste_mask dtype: {cumulative_paste_mask.dtype}")
-            # Non facciamo assert qui, solo print per vedere cosa succede
+            if not hasattr(self, "_dbg_zero_ood"):
+                self._dbg_zero_ood = 0
+            if self._dbg_zero_ood < 10:
+                print("❌ OOD_MASK still zero right after paste!")
+                print(f"   paste_mask any: {bool(cumulative_paste_mask.any().item())}")
+                print(f"   paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
+                print(f"   ood_mask dtype: {target['ood_mask'].dtype}")
+                print(f"   ood_mask unique: {torch.unique(target['ood_mask']).tolist()[:10]}")
+                print(f"   ood_mask shape: {target['ood_mask'].shape}")
+                print(f"   cumulative_paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
+                print(f"   cumulative_paste_mask dtype: {cumulative_paste_mask.dtype}")
+                self._dbg_zero_ood += 1
         
         # Store paste reality check counters in target for logging in lightning_module
         if self._log_reality_check:
