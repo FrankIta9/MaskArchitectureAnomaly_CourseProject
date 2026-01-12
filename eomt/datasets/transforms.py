@@ -102,7 +102,33 @@ class Transforms(nn.Module):
         return img, target
 
     def _filter(self, target: dict[str, Union[Tensor, TVTensor]], keep: Tensor) -> dict:
-        return {k: wrap(v[keep], like=v) for k, v in target.items()}
+        """
+        Filter target entries by boolean mask.
+        
+        Args:
+            target: Target dictionary
+            keep: Boolean mask with shape [N] for filtering arrays of masks/labels
+            
+        Returns:
+            Filtered target dictionary
+            
+        Note:
+            Fields like 'ood_mask' (pixel-wise [H, W]) are excluded from filtering
+            as they are not arrays of masks but single pixel-wise masks.
+        """
+        filtered = {}
+        # Fields to exclude from filtering (pixel-wise, not arrays)
+        exclude_from_filter = {"ood_mask"}  # ood_mask is [H, W], not [N, H, W]
+        
+        for k, v in target.items():
+            if k in exclude_from_filter:
+                # Skip filtering for pixel-wise fields
+                filtered[k] = v
+            else:
+                # Apply filtering for array fields (masks, labels, is_crowd)
+                filtered[k] = wrap(v[keep], like=v)
+        
+        return filtered
 
     def forward(
         self, img: Tensor, target: dict[str, Union[Tensor, TVTensor]]
