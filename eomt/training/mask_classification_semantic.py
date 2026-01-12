@@ -122,6 +122,47 @@ class MaskClassificationSemantic(LightningModule):
         self.ood_lostfound_path = ood_lostfound_path
         self.ood_fsstatic_path = ood_fsstatic_path
         self.ood_val_num_samples = ood_val_num_samples
+        
+        # Flag per tracciare se warmup_start_epoch è stato impostato automaticamente da resume
+        self._warmup_start_epoch_auto_set = False
+    
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """
+        Hook chiamato quando Lightning carica un checkpoint (resume).
+        Imposta automaticamente warmup_start_epoch dall'epoch del checkpoint.
+        
+        Logica:
+        - Se energy_warmup_start_epoch è esplicitamente settato (diverso da 0), lo rispetta
+        - Altrimenti, se c'è un checkpoint con epoch, usa quello per warmup_start_epoch
+        """
+        # Solo se energy loss è abilitato
+        if self.criterion.eim_enabled and hasattr(self.criterion, 'energy_ood_loss'):
+            energy_loss = self.criterion.energy_ood_loss
+            
+            # Se warmup_start_epoch è stato esplicitamente settato dall'utente (diverso da 0),
+            # lo rispettiamo (potrebbe essere un valore specifico per altri scopi)
+            if energy_loss.warmup_start_epoch != 0:
+                logging.info(
+                    f"📌 Resume: warmup_start_epoch è stato esplicitamente settato a {energy_loss.warmup_start_epoch}, "
+                    f"manteniamo questo valore"
+                )
+                return
+            
+            # Leggi epoch dal checkpoint
+            checkpoint_epoch = checkpoint.get("epoch")
+            if checkpoint_epoch is not None:
+                # Imposta warmup_start_epoch automaticamente dall'epoch del checkpoint
+                energy_loss.warmup_start_epoch = int(checkpoint_epoch)
+                self._warmup_start_epoch_auto_set = True
+                logging.info(
+                    f"✅ Resume: Impostato automaticamente warmup_start_epoch={checkpoint_epoch} "
+                    f"dall'epoch del checkpoint (resume da epoca {checkpoint_epoch})"
+                )
+            else:
+                logging.warning(
+                    "⚠️ Resume: Checkpoint caricato ma 'epoch' non trovato nel checkpoint. "
+                    "warmup_start_epoch rimane a 0 (riparte da zero il warmup)"
+                )
     
     def on_train_epoch_start(self):
         """Update energy loss warmup scheduler with current epoch and log status."""
