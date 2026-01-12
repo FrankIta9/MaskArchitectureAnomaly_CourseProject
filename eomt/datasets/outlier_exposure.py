@@ -336,23 +336,9 @@ class OutlierExposureTransform(nn.Module):
                             x = min(x, max(0, w - obj_w_scaled))
                             y = min(y, max(0, h - obj_h_scaled))
                     else:
-                        # Fallback: usa ordine classico se drivable placement fallisce
-                        self.random_placement_count += 1
-                        y_min_ratio, y_max_ratio = self.paste_y_range
-                        y_min = int(y_min_ratio * h)
-                        y_max = int(y_max_ratio * h)
-                        y = random.randint(y_min, y_max)
-                        
-                        scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                        scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
-                        
-                        obj_h_scaled = max(1, int(obj_h_orig * scale))
-                        obj_w_scaled = max(1, int(obj_w_orig * scale))
-                        obj_h_scaled = min(obj_h_scaled, h)
-                        obj_w_scaled = min(obj_w_scaled, w)
-                        
-                        x = random.randint(0, max(0, w - obj_w_scaled))
-                        y = min(y, max(0, h - obj_h_scaled))
+                        # REGOLA D'ORO: Se drivable placement fallisce, SKIPPA il paste
+                        # Non fare fallback random perché potrebbe piazzare nel padding nero
+                        continue  # Skip this object, try next one
                 else:
                     # ORDINE CLASSICO: y -> scale -> x (quando non c'è drivable_mask)
                     self.random_placement_count += 1
