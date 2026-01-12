@@ -31,7 +31,26 @@ from matplotlib.lines import Line2D
 import numpy as np
 import io
 import matplotlib.pyplot as plt
-import numpy as np
+
+
+def torch_percentile(x: torch.Tensor, q: float) -> float:
+    """
+    Compute percentile using torch (GPU-friendly, no CPU conversion needed).
+    
+    Args:
+        x: Input tensor (can be on GPU or CPU)
+        q: Percentile value (0-100)
+        
+    Returns:
+        Percentile value as float
+    """
+    x = x.detach().flatten()
+    n = x.numel()
+    if n == 0:
+        return float("nan")
+    k = int(round((q / 100.0) * (n - 1))) + 1  # kthvalue è 1-indexed
+    k = max(1, min(k, n))
+    return float(torch.kthvalue(x, k).values.item())
 from torch.nn.functional import interpolate
 from torchvision.transforms.v2.functional import pad
 import logging
@@ -394,9 +413,8 @@ class LightningModule(lightning.LightningModule):
         current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
         log_every = 200
         if current_step % log_every == 0 and len(ood_ratios_per_sample) > 0:
-            import numpy as np
             ood_ratio_mean = float(np.mean(ood_ratios_per_sample))
-            ood_ratio_p50 = float(np.percentile(ood_ratios_per_sample, 50))
+            ood_ratio_p50 = torch_percentile(torch.tensor(ood_ratios_per_sample), 50)
             self.log("dbg/oe/ood_ratio_mean_batch", ood_ratio_mean, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
             self.log("dbg/oe/ood_ratio_p50_batch", ood_ratio_p50, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
             
@@ -623,11 +641,11 @@ class LightningModule(lightning.LightningModule):
                                 # Log percentili ogni 200 step
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
                                 if current_step % 200 == 0:
-                                    energy_id_np = energy_id.detach().cpu().numpy()
-                                    if len(energy_id_np) > 0:
-                                        p10_id = float(np.percentile(energy_id_np, 10))
-                                        p50_id = float(np.percentile(energy_id_np, 50))
-                                        p90_id = float(np.percentile(energy_id_np, 90))
+                                    energy_id_values = energy_id.detach().flatten()
+                                    if energy_id_values.numel() > 0:
+                                        p10_id = torch_percentile(energy_id_values, 10)
+                                        p50_id = torch_percentile(energy_id_values, 50)
+                                        p90_id = torch_percentile(energy_id_values, 90)
                                         self.log("dbg/energy_id_p10", p10_id, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
                                         self.log("dbg/energy_id_p50", p50_id, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
                                         self.log("dbg/energy_id_p90", p90_id, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
@@ -661,11 +679,11 @@ class LightningModule(lightning.LightningModule):
                                 # Log percentili ogni 200 step
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
                                 if current_step % 200 == 0:
-                                    energy_ood_np = energy_ood.detach().cpu().numpy()
-                                    if len(energy_ood_np) > 0:
-                                        p10_ood = float(np.percentile(energy_ood_np, 10))
-                                        p50_ood = float(np.percentile(energy_ood_np, 50))
-                                        p90_ood = float(np.percentile(energy_ood_np, 90))
+                                    energy_ood_values = energy_ood.detach().flatten()
+                                    if energy_ood_values.numel() > 0:
+                                        p10_ood = torch_percentile(energy_ood_values, 10)
+                                        p50_ood = torch_percentile(energy_ood_values, 50)
+                                        p90_ood = torch_percentile(energy_ood_values, 90)
                                         self.log("dbg/energy_ood_p10", p10_ood, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
                                         self.log("dbg/energy_ood_p50", p50_ood, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
                                         self.log("dbg/energy_ood_p90", p90_ood, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
@@ -788,22 +806,22 @@ class LightningModule(lightning.LightningModule):
             logging.warning("⚠️ Task 4: Cannot compute margins - empty energy buffers")
             return
         
-        # Convert to numpy arrays (numpy already imported at top of file)
-        energy_id_array = np.array(self._energy_id_buffer)
-        energy_ood_array = np.array(self._energy_ood_buffer)
+        # Convert to torch tensors (more efficient, GPU-friendly)
+        energy_id_tensor = torch.tensor(self._energy_id_buffer, dtype=torch.float32)
+        energy_ood_tensor = torch.tensor(self._energy_ood_buffer, dtype=torch.float32)
         
-        # Compute statistics
-        energy_id_mean = float(np.mean(energy_id_array))
-        energy_id_std = float(np.std(energy_id_array))
-        energy_id_p90 = float(np.percentile(energy_id_array, 90))
-        energy_id_p50 = float(np.percentile(energy_id_array, 50))
-        energy_id_p10 = float(np.percentile(energy_id_array, 10))
+        # Compute statistics using torch
+        energy_id_mean = float(energy_id_tensor.mean().item())
+        energy_id_std = float(energy_id_tensor.std().item())
+        energy_id_p90 = torch_percentile(energy_id_tensor, 90)
+        energy_id_p50 = torch_percentile(energy_id_tensor, 50)
+        energy_id_p10 = torch_percentile(energy_id_tensor, 10)
         
-        energy_ood_mean = float(np.mean(energy_ood_array))
-        energy_ood_std = float(np.std(energy_ood_array))
-        energy_ood_p90 = float(np.percentile(energy_ood_array, 90))
-        energy_ood_p50 = float(np.percentile(energy_ood_array, 50))
-        energy_ood_p10 = float(np.percentile(energy_ood_array, 10))
+        energy_ood_mean = float(energy_ood_tensor.mean().item())
+        energy_ood_std = float(energy_ood_tensor.std().item())
+        energy_ood_p90 = torch_percentile(energy_ood_tensor, 90)
+        energy_ood_p50 = torch_percentile(energy_ood_tensor, 50)
+        energy_ood_p10 = torch_percentile(energy_ood_tensor, 10)
         
         # Log statistics
         current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
