@@ -95,8 +95,8 @@ data:
     # Path al dataset Cityscapes (adatta il path)
     path: "/path/to/Cityscapes"
     
-    # Batch size (adatta alle tue risorse)
-    batch_size: 4
+    # Batch size (config "safe" per batch_size 2 con accumulate_grad_batches 2)
+    batch_size: 2
     num_workers: 4
     
     # IMPORTANTE: 1024x1024 per compatibilità con i pesi pre-addestrati
