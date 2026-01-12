@@ -341,10 +341,13 @@ class LightningModule(lightning.LightningModule):
         imgs, targets = batch
         
         # A1: OE Statistics - Quanto OE sta colpendo davvero
+        # LOG 1: Statistiche OOD per batch (ogni 200 step)
         batch_has_ood = False
         batch_n_ood_pixels = 0
         batch_total_pixels = 0
         batch_n_objects_pasted = 0  # Stima: numero di regioni connesse in ood_mask
+        ood_ratios_per_sample = []  # Per calcolare mean/p50
+        y_norm_centers = []  # Per calcolare y_norm_center medio
         
         if targets and "ood_mask" in targets[0]:
             for target in targets:
@@ -358,6 +361,15 @@ class LightningModule(lightning.LightningModule):
                         n_ood = ood_pixels.sum().item()
                         batch_n_ood_pixels += n_ood
                         batch_total_pixels += h * w
+                        ood_ratio_sample = n_ood / (h * w)
+                        ood_ratios_per_sample.append(ood_ratio_sample)
+                        
+                        # LOG 1: y_norm_center del bounding box OOD
+                        ood_y_coords = torch.nonzero(ood_pixels, as_tuple=False)[:, 0]  # [N]
+                        if ood_y_coords.numel() > 0:
+                            y_center = ood_y_coords.float().mean().item()
+                            y_norm_center = y_center / max(1.0, float(h - 1))
+                            y_norm_centers.append(y_norm_center)
                         
                         # Stima numero oggetti pasted: conta regioni connesse (approssimativo)
                         # Usa connected components o semplicemente conta "blob" significativi
@@ -376,6 +388,20 @@ class LightningModule(lightning.LightningModule):
                             if n_ood > 0:
                                 # Assumendo area media per oggetto ~1000 pixel
                                 batch_n_objects_pasted += max(1, n_ood // 1000)
+        
+        # LOG 1: Log statistiche OOD ogni 200 step
+        current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
+        log_every = 200
+        if current_step % log_every == 0 and len(ood_ratios_per_sample) > 0:
+            import numpy as np
+            ood_ratio_mean = float(np.mean(ood_ratios_per_sample))
+            ood_ratio_p50 = float(np.percentile(ood_ratios_per_sample, 50))
+            self.log("dbg/oe/ood_ratio_mean_batch", ood_ratio_mean, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+            self.log("dbg/oe/ood_ratio_p50_batch", ood_ratio_p50, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+            
+            if len(y_norm_centers) > 0:
+                y_norm_center_mean = float(np.mean(y_norm_centers))
+                self.log("dbg/oe/y_norm_center_mean", y_norm_center_mean, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
         
         # Log A1: OE statistics
         paste_applied = 1.0 if batch_has_ood else 0.0

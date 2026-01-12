@@ -4,7 +4,7 @@
 # ---------------------------------------------------------------
 
 from pathlib import Path
-from typing import Union, Optional
+from typing import Union, Optional, Tuple
 from torch.utils.data import DataLoader
 from torchvision.datasets import Cityscapes
 
@@ -52,6 +52,9 @@ class CityscapesSemanticWithOE(LightningDataModule):
         # Drivable region constraints (inspired by ClimaOoD)
         use_drivable_regions: bool = True,
         drivable_class_ids: Optional[list] = None,  # [0, 1] for road, sidewalk in Cityscapes
+        # P0 Fix: Y position range and blending
+        paste_y_range: Tuple[float, float] = (0.65, 0.98),
+        blend_alpha: float = 1.0,  # 1.0 = dry paste (more stable), 0.8 for blending
     ) -> None:
         """
         Args:
@@ -71,6 +74,8 @@ class CityscapesSemanticWithOE(LightningDataModule):
             perspective_strength: Strength of perspective effect (0.0-1.0, default: 1.0)
             use_drivable_regions: If True, only place objects on drivable regions (default: True)
             drivable_class_ids: List of train_id class IDs for drivable regions (default: [0, 1])
+            paste_y_range: Tuple (min_ratio, max_ratio) of image height for Y position (default: (0.65, 0.98))
+            blend_alpha: Alpha blending factor for pasted objects (default: 1.0, dry paste)
         """
         super().__init__(
             path=path,
@@ -81,6 +86,10 @@ class CityscapesSemanticWithOE(LightningDataModule):
             check_empty_targets=check_empty_targets,
         )
         self.save_hyperparameters(ignore=["_class_path"])
+
+        # Store paste_y_range and blend_alpha for reference
+        self.paste_y_range = paste_y_range
+        self.blend_alpha = blend_alpha
 
         # Initialize Outlier Exposure if COCO path is provided
         outlier_exposure_transform = None
@@ -106,6 +115,8 @@ class CityscapesSemanticWithOE(LightningDataModule):
                     perspective_strength=perspective_strength,
                     use_drivable_regions=use_drivable_regions,
                     drivable_class_ids=drivable_class_ids,
+                    paste_y_range=paste_y_range,
+                    blend_alpha=blend_alpha,
                 )
                 print(f"Outlier Exposure enabled with {len(coco_dataset)} COCO objects")
             except Exception as e:

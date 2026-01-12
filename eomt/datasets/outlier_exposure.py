@@ -41,7 +41,7 @@ class OutlierExposureTransform(nn.Module):
         max_objects: int = 3,
         min_scale: float = 0.1,
         max_scale: float = 0.3,
-        blend_alpha: float = 0.8,
+        blend_alpha: float = 1.0,  # 1.0 = dry paste (more stable), 0.8 for blending
         # Multi-scale weighted distribution (for better matching with small anomalies)
         use_weighted_scale: bool = False,
         scale_ranges: Optional[list] = None,  # [(min1, max1), (min2, max2), ...]
@@ -53,7 +53,7 @@ class OutlierExposureTransform(nn.Module):
         use_drivable_regions: bool = True,
         drivable_class_ids: Optional[list] = None,  # [0, 1] for road, sidewalk in Cityscapes
         # P0 Fix: Y position range for paste (biased towards bottom = on-road)
-        paste_y_range: Tuple[float, float] = (0.55, 0.95),  # (min_ratio, max_ratio) of image height
+        paste_y_range: Tuple[float, float] = (0.65, 0.98),  # (min_ratio, max_ratio) of image height
     ):
         """
         Args:
@@ -82,7 +82,7 @@ class OutlierExposureTransform(nn.Module):
         self.max_objects = max_objects
         self.min_scale = min_scale
         self.max_scale = max_scale
-        self.blend_alpha = blend_alpha
+        self.blend_alpha = float(blend_alpha)
         self.use_weighted_scale = use_weighted_scale
         
         # Multi-scale weighted distribution
@@ -114,6 +114,10 @@ class OutlierExposureTransform(nn.Module):
         # Note: These are reset at epoch start (not thread-safe with multi-worker)
         self.drivable_placement_count = 0
         self.random_placement_count = 0
+        
+        # FIX 4: Debug counter for logging (first 20 samples only)
+        self._dbg_count = 0
+        self._resample_warn_logged = False  # Log resample warning only once
     
     def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -245,6 +249,10 @@ class OutlierExposureTransform(nn.Module):
             target["ood_mask"] = ood_mask
             return img, target
         
+        # FIX 4: Hard-min size check with resample (max 10 attempts)
+        OOD_RATIO_MIN = 0.002
+        MAX_RESAMPLE = 10
+        
         num_objects = random.randint(self.min_objects, self.max_objects)
         
         # Get drivable mask once for all objects
@@ -253,57 +261,95 @@ class OutlierExposureTransform(nn.Module):
         # Accumulate paste_mask from all pasted objects
         cumulative_paste_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
         
-        for _ in range(num_objects):
-            # Get random outlier object
-            obj_img, obj_mask = self._get_random_outlier_object()
-            obj_h_orig, obj_w_orig = obj_img.shape[-2:]
+        # FIX 4: Resample loop if ood_ratio too small
+        for resample_attempt in range(MAX_RESAMPLE):
+            # Reset cumulative mask for resample
+            if resample_attempt > 0:
+                cumulative_paste_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
+                img = img_original.clone()  # Restore original image for resample
             
-            # Select base scale using weighted distribution if enabled, otherwise uniform
-            if self.use_weighted_scale:
-                base_scale = self._sample_weighted_scale()
-            else:
-                base_scale = random.uniform(self.min_scale, self.max_scale)
+            img_original = img.clone()  # Keep original image for resample
             
-            # P0 Fix: Scegli y biased prima (con paste_y_range), poi calcola scale, poi ricalcola dimensioni
-            # 1) Scegli y (biased verso bottom = on-road proxy)
-            y_min_ratio, y_max_ratio = self.paste_y_range
-            y_min = int(y_min_ratio * h)
-            y_max = int(y_max_ratio * h)
-            y = random.randint(y_min, y_max)
-            
-            # 2) Applica scala prospettica basata su y
-            scale = self._apply_perspective_aware_scale(base_scale, y, h)
-            scale = max(self.min_scale, min(self.max_scale * 1.5, scale))  # Allow slightly larger for perspective
-            
-            # 3) Ricalcola dimensioni con scale finale
-            obj_h_scaled = max(1, int(obj_h_orig * scale))
-            obj_w_scaled = max(1, int(obj_w_orig * scale))
-            obj_h_scaled = min(obj_h_scaled, h)
-            obj_w_scaled = min(obj_w_scaled, w)
-            
-            # 4) Scegli x e clamp y con dimensioni nuove
-            x = random.randint(0, max(0, w - obj_w_scaled))
-            y = min(y, max(0, h - obj_h_scaled))  # Clamp y per evitare overflow
-            
-            # 5) Prova drivable position se abilitato (con dimensioni corrette)
-            if drivable_mask is not None and drivable_mask.any():
-                # Try to sample from drivable regions using final scaled dimensions
-                position = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
-                if position is not None:
-                    x, y = position
-                    self.drivable_placement_count += 1
+            for _ in range(num_objects):
+                # Get random outlier object
+                obj_img, obj_mask = self._get_random_outlier_object()
+                obj_h_orig, obj_w_orig = obj_img.shape[-2:]
+                
+                # Select base scale using weighted distribution if enabled, otherwise uniform
+                if self.use_weighted_scale:
+                    base_scale = self._sample_weighted_scale()
                 else:
-                    self.random_placement_count += 1  # Fallback: usa x,y già scelti (già biased verso bottom)
+                    base_scale = random.uniform(self.min_scale, self.max_scale)
+                
+                # P0 Fix: Scegli y biased prima (con paste_y_range), poi calcola scale, poi ricalcola dimensioni
+                # 1) Scegli y (biased verso bottom = on-road proxy)
+                y_min_ratio, y_max_ratio = self.paste_y_range
+                y_min = int(y_min_ratio * h)
+                y_max = int(y_max_ratio * h)
+                y = random.randint(y_min, y_max)
+                
+                # 2) Applica scala prospettica basata su y
+                scale = self._apply_perspective_aware_scale(base_scale, y, h)
+                scale = max(self.min_scale, min(self.max_scale * 1.5, scale))  # Allow slightly larger for perspective
+                
+                # 3) Ricalcola dimensioni con scale finale
+                obj_h_scaled = max(1, int(obj_h_orig * scale))
+                obj_w_scaled = max(1, int(obj_w_orig * scale))
+                obj_h_scaled = min(obj_h_scaled, h)
+                obj_w_scaled = min(obj_w_scaled, w)
+                
+                # 4) Scegli x e clamp y con dimensioni nuove
+                x = random.randint(0, max(0, w - obj_w_scaled))
+                y = min(y, max(0, h - obj_h_scaled))  # Clamp y per evitare overflow
+                
+                # 5) Prova drivable position se abilitato (con dimensioni corrette)
+                if drivable_mask is not None and drivable_mask.any():
+                    # Try to sample from drivable regions using final scaled dimensions
+                    position = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
+                    if position is not None:
+                        x, y = position
+                        self.drivable_placement_count += 1
+                    else:
+                        self.random_placement_count += 1  # Fallback: usa x,y già scelti (già biased verso bottom)
+                else:
+                    self.random_placement_count += 1  # No drivable mask: usa x,y già scelti (già biased verso bottom)
+                
+                # Paste object and get paste_mask
+                img, target, paste_mask = self._paste_object(
+                    img, target, obj_img, obj_mask, (x, y), scale
+                )
+                
+                # LOG 2: Debug logging for first 20 samples
+                if self._dbg_count < 20:
+                    ood_ratio_obj = paste_mask.float().mean().item() if paste_mask.numel() > 0 else 0.0
+                    y_norm = float(y) / max(1.0, float(h - 1))
+                    print(f"[OE Debug {self._dbg_count}] y={y} (norm={y_norm:.3f}), base_scale={base_scale:.4f}, final_scale={scale:.4f}, obj_h={obj_h_scaled}, obj_w={obj_w_scaled}, ood_ratio={ood_ratio_obj:.6f}")
+                    self._dbg_count += 1
+                
+                # Accumulate paste_mask
+                cumulative_paste_mask = cumulative_paste_mask | paste_mask
+            
+            # FIX 4: Check ood_ratio after all objects pasted
+            ood_ratio = cumulative_paste_mask.float().mean().item()
+            
+            if ood_ratio >= OOD_RATIO_MIN:
+                # Accept this paste
+                break
             else:
-                self.random_placement_count += 1  # No drivable mask: usa x,y già scelti (già biased verso bottom)
-            
-            # Paste object and get paste_mask
-            img, target, paste_mask = self._paste_object(
-                img, target, obj_img, obj_mask, (x, y), scale
-            )
-            
-            # Accumulate paste_mask
-            cumulative_paste_mask = cumulative_paste_mask | paste_mask
+                # LOG 3: Log resample attempt (only once)
+                if resample_attempt == 0 and not self._resample_warn_logged:
+                    import logging
+                    logging.warning(f"⚠️ [OE] ood_ratio={ood_ratio:.6f} < {OOD_RATIO_MIN}, resample {resample_attempt + 1}/{MAX_RESAMPLE}")
+                    self._resample_warn_logged = True
+                
+                # Restore original image for resample
+                if resample_attempt < MAX_RESAMPLE - 1:
+                    img = img_original
+                else:
+                    # After max attempts, accept but log warning
+                    if resample_attempt == MAX_RESAMPLE - 1:
+                        import logging
+                        logging.warning(f"⚠️ [OE] ood_ratio={ood_ratio:.6f} still < {OOD_RATIO_MIN} after {MAX_RESAMPLE} attempts, accepting")
         
         # Task 1: Build ood_mask: 1 = OOD (pasted), 0 = ID (rest)
         ood_mask = cumulative_paste_mask.to(torch.uint8)  # 1 = OOD, 0 = ID
@@ -364,27 +410,17 @@ class OutlierExposureTransform(nn.Module):
         """
         if not self.use_perspective_aware or self.perspective_strength <= 0.0:
             return base_scale
-        
-        # Perspective factor: objects in lower Y (higher y value, closer) should be larger
-        # Formula inspired by ClimaOoD: hi = H/yi (inverse relationship)
-        # Normalize Y to [0.5, 2.0] range for reasonable scaling
-        # Y=0 (top, far) -> factor ~0.5 (smaller)
-        # Y=h (bottom, close) -> factor ~2.0 (larger)
-        normalized_y = (y + 1) / h  # +1 to avoid division by zero
-        perspective_factor = (h / (normalized_y * h + 1))  # Inverse relationship
-        
-        # Normalize to reasonable range [0.7, 1.5] for perspective effect
-        min_factor = 0.7
-        max_factor = 1.5
-        perspective_factor = min_factor + (max_factor - min_factor) * (
-            (perspective_factor - 0.5) / 1.5  # Normalize from [0.5, 2.0] to [0.7, 1.5]
-        )
-        perspective_factor = max(min_factor, min(max_factor, perspective_factor))
-        
-        # Apply perspective strength (0.0 = no effect, 1.0 = full effect)
-        adjusted_factor = 1.0 + (perspective_factor - 1.0) * self.perspective_strength
-        
-        return base_scale * adjusted_factor
+
+        # t in [0,1]: 0=top (far), 1=bottom (near)
+        t = float(y) / max(1.0, float(h - 1))
+
+        min_factor = 0.70   # far -> smaller
+        max_factor = 1.50   # near -> larger
+        perspective_factor = min_factor + (max_factor - min_factor) * t
+
+        # apply strength
+        adjusted = 1.0 + (perspective_factor - 1.0) * self.perspective_strength
+        return base_scale * adjusted
     
     def _get_drivable_mask(self, target: Dict[str, Any], h: int, w: int) -> Optional[torch.Tensor]:
         """
