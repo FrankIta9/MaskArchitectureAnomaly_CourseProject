@@ -580,7 +580,7 @@ class OutlierExposureTransform(nn.Module):
                 
                 # Get random outlier object (with category_name)
                 obj_img, obj_mask, category_name = self._get_random_outlier_object()
-                obj_h_orig, obj_w_orig = obj_img.shape[-2:]
+            obj_h_orig, obj_w_orig = obj_img.shape[-2:]
                 
                 # For ID paste: only use mappable categories
                 # For OOD paste: only use non-mappable categories
@@ -650,7 +650,7 @@ class OutlierExposureTransform(nn.Module):
                             position2 = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
                             if position2 is not None:
                                 x, y = position2
-                            else:
+                else:
                                 # Fallback safe: random solo in valid+bottom
                                 y_min = int(0.7 * h)
                                 x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
@@ -658,7 +658,7 @@ class OutlierExposureTransform(nn.Module):
                                     if self._log_reality_check:
                                         self._skipped_no_position += 1
                                     continue  # Skip this object
-                        else:
+            else:
                             # Verifica che l'oggetto ci stia ancora nella posizione scelta
                             if x + obj_w_scaled > w or y + obj_h_scaled > h:
                                 # Se non ci sta, clamp x,y
@@ -696,13 +696,13 @@ class OutlierExposureTransform(nn.Module):
             obj_h_scaled = min(obj_h_scaled, h)
             obj_w_scaled = min(obj_w_scaled, w)
             
-                # Fix: Usa fallback_safe_position anche qui per evitare padding
-                x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
-                if x is None:
-                    if self._log_reality_check:
-                        self._skipped_no_position += 1
-                    continue  # Skip this object if no valid position
-                self.random_placement_count += 1
+            # Fix: Usa fallback_safe_position anche qui per evitare padding
+            x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
+            if x is None:
+                if self._log_reality_check:
+                    self._skipped_no_position += 1
+                continue  # Skip this object if no valid position
+            self.random_placement_count += 1
                 
                 # Paste object and get paste_mask (with category_name for ID/OOD distinction)
                 img, target, paste_mask, success = self._paste_object(
