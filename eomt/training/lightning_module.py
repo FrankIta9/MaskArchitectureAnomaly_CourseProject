@@ -9,6 +9,7 @@
 # ---------------------------------------------------------------
 
 import math
+import re
 from typing import Optional, cast
 import lightning
 from lightning.fabric.utilities import rank_zero_info
@@ -362,41 +363,41 @@ class LightningModule(lightning.LightningModule):
                 print("✅ Training only decoder for Outlier Exposure fine-tuning")
         
         # Configure optimizer with two param groups: decoder and unfrozen backbone
-        # CRITICAL FIX: Group params into 2 lists instead of creating one param group per parameter
         decoder_params = []
         backbone_params = []
         
+        total_blocks = len(self.network.encoder.backbone.blocks) if (
+            hasattr(self.network, "encoder")
+            and hasattr(self.network.encoder, "backbone")
+            and hasattr(self.network.encoder.backbone, "blocks")
+        ) else 0
+        
+        # Debug: verifica unfreeze reale
+        if self.unfreeze_last_n_blocks > 0:
+            num_unfreezed = sum(1 for p in self.network.encoder.backbone.parameters() if p.requires_grad)
+            print(f"🔍 DEBUG: backbone params unfreezed = {num_unfreezed}")
+        
         for name, param in self.named_parameters():
             if not param.requires_grad:
-                continue  # Skip frozen parameters
+                continue
             
-            # Check if parameter belongs to encoder.backbone.blocks (last N blocks)
-            # Task 2B: Robust block index parsing - find "blocks" token and read next numeric token
             is_backbone_param = False
-            if self.unfreeze_last_n_blocks > 0 and 'encoder.backbone.blocks' in name:
-                # Robust parsing: split by '.' and find index of 'blocks', then check next token
-                parts = name.split('.')
-                try:
-                    blocks_idx = parts.index('blocks')
-                    if blocks_idx + 1 < len(parts) and parts[blocks_idx + 1].isdigit():
-                        block_idx = int(parts[blocks_idx + 1])
-                        total_blocks = len(self.network.encoder.backbone.blocks) if hasattr(self.network.encoder.backbone, 'blocks') else 0
-                        if total_blocks > 0 and block_idx >= (total_blocks - self.unfreeze_last_n_blocks):
-                            is_backbone_param = True
-                except (ValueError, IndexError):
-                    # If parsing fails, treat as decoder param (safer)
-                    pass
-            elif self.unfreeze_last_n_blocks > 0 and 'encoder.backbone.norm' in name:
-                # Final norm is also unfrozen
-                is_backbone_param = True
+            
+            if self.unfreeze_last_n_blocks > 0:
+                # matcha "...backbone.blocks.<idx>...."
+                m = re.search(r"backbone\.blocks\.(\d+)", name)
+                if m and total_blocks > 0:
+                    block_idx = int(m.group(1))
+                    if block_idx >= (total_blocks - self.unfreeze_last_n_blocks):
+                        is_backbone_param = True
+                elif "backbone.norm" in name:
+                    is_backbone_param = True
             
             if is_backbone_param:
                 backbone_params.append(param)
             else:
-                # Decoder/head/upscale params
                 decoder_params.append(param)
         
-        # Task 2B: Create only 2 param groups (not one per parameter)
         param_groups = []
         if decoder_params:
             param_groups.append({"params": decoder_params, "lr": self.lr_decoder})
@@ -412,10 +413,9 @@ class LightningModule(lightning.LightningModule):
         print(f"   Decoder group: {len(decoder_params)} params, {decoder_numel:,} elements @ lr={self.lr_decoder}")
         if backbone_params:
             print(f"   Backbone group: {len(backbone_params)} params, {backbone_numel:,} elements @ lr={self.lr_backbone}")
-            # Task 2B: Show sample backbone param names to verify they are blocks.10, blocks.11, etc.
-            # Get sample backbone parameter names for logging (avoid tensor comparison)
+            # Show sample backbone param names
             sample_backbone_names = []
-            backbone_param_ids = {id(p) for p in backbone_params[:3]}  # Use id() for identity comparison
+            backbone_param_ids = {id(p) for p in backbone_params[:3]}
             for name, p in self.named_parameters():
                 if id(p) in backbone_param_ids:
                     sample_backbone_names.append(name)
@@ -424,7 +424,10 @@ class LightningModule(lightning.LightningModule):
             if sample_backbone_names:
                 print(f"   Sample backbone params: {', '.join(sample_backbone_names[:3])}")
         else:
-            print("   ⚠️ WARNING: Backbone param group is empty! Unfreeze not working.")
+            if self.unfreeze_last_n_blocks > 0:
+                print("   ⚠️ WARNING: Backbone param group is empty! Unfreeze selection failed (name matching).")
+            else:
+                print("   ℹ️  Backbone param group is empty (unfreeze_last_n_blocks=0, expected).")
         
         optimizer = AdamW(param_groups, weight_decay=self.weight_decay)
 
