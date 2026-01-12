@@ -253,20 +253,32 @@ def main():
     # VALUTAZIONE
     # ============================================================================
     print(f"{'='*60}")
-    print("🎯 Valutazione:")
+    print("🎯 Valutazione (Sanity Check S1):")
     print(f"{'='*60}\n")
     
-    # Target ragionevole: almeno 20-50% dei batch con OOD
-    target_min_pct = 20.0
+    # Target ragionevole: almeno 50-70% dei batch con OOD (S1 requirement)
+    target_min_pct = 50.0
+    target_p90_min = 0.005  # 0.5%
     
+    # Check percentuale batch con OOD
     if pct_batches_with_ood >= target_min_pct:
         print(f"✅ Percentuale batch con OOD ({pct_batches_with_ood:.2f}%) >= target ({target_min_pct}%)")
     else:
         print(f"❌ Percentuale batch con OOD ({pct_batches_with_ood:.2f}%) < target ({target_min_pct}%)")
         print(f"⚠️  Il paste COCO non sta funzionando abbastanza!")
-        print(f"⚠️  Controlla paste_probability, filtri di posizionamento, ecc.")
+        print(f"⚠️  Target: ≥50-70% (anche 80% se gestito bene)")
+        print(f"⚠️  Fix: Aumenta paste_probability (es. 0.25 → 0.50)")
     
+    # Check P90 ood_ratio
     if len(ood_ratios) > 0:
+        ood_ratio_p90 = np.percentile(ood_ratios, 90)
+        if ood_ratio_p90 >= target_p90_min:
+            print(f"✅ P90 ood_ratio ({ood_ratio_p90:.6f}) >= target ({target_p90_min})")
+        else:
+            print(f"❌ P90 ood_ratio ({ood_ratio_p90:.6f}) < target ({target_p90_min})")
+            print(f"⚠️  Gli oggetti COCO sono troppo piccoli!")
+            print(f"⚠️  Fix: Aumenta min_scale, coco_min_area, o riduci filtri troppo stretti")
+        
         if ood_ratio_mean > 0.0001:
             print(f"✅ OOD ratio medio ({ood_ratio_mean:.6f}) > 0.0001")
         else:
@@ -275,13 +287,21 @@ def main():
     
     print(f"\n✅ Overlay salvati in: {output_dir}")
     
-    # Exit code
-    if pct_batches_with_ood >= target_min_pct and len(ood_ratios) > 0 and ood_ratio_mean > 0.0001:
-        print("\n✅ Sanity Check A2 PASSATO: Il paste COCO sta funzionando!")
-        sys.exit(0)
+    # Exit code (S1 requirements)
+    if len(ood_ratios) > 0:
+        ood_ratio_p90 = np.percentile(ood_ratios, 90)
+        if (pct_batches_with_ood >= target_min_pct and 
+            ood_ratio_p90 >= target_p90_min and 
+            ood_ratio_mean > 0.0001):
+            print("\n✅ Sanity Check S1 PASSATO: Il paste COCO sta funzionando!")
+            sys.exit(0)
+        else:
+            print("\n❌ Sanity Check S1 FALLITO: Il paste COCO non sta funzionando abbastanza!")
+            print("⚠️  Fai debug dei parametri di paste (paste_probability, filtri, ecc.)")
+            print("⚠️  NON procedere con training lungo finché S1 non passa!")
+            sys.exit(1)
     else:
-        print("\n❌ Sanity Check A2 FALLITO: Il paste COCO non sta funzionando abbastanza!")
-        print("⚠️  Fai debug dei parametri di paste (paste_probability, filtri, ecc.)")
+        print("\n❌ Sanity Check S1 FALLITO: Nessun batch con OOD!")
         sys.exit(1)
 
 
