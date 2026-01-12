@@ -424,9 +424,45 @@ class LightningModule(lightning.LightningModule):
                     )
         
         # Task 1: Print ood_mask for first 3 batches + overlay check
+        # P0 Fix: Sanity check per labels/is_crowd (tipo e shape)
         if self._ood_mask_print_count < 3:
             # Check if any target has ood_mask
             for i, target in enumerate(targets):
+                # P0 Fix: Sanity check per labels/is_crowd
+                if "labels" in target:
+                    labels_type = type(target["labels"])
+                    if isinstance(target["labels"], list):
+                        labels_len = len(target["labels"])
+                        labels_first_type = type(target["labels"][0]) if labels_len > 0 else None
+                        logging.warning(
+                            f"⚠️ P0 Fix - Batch {batch_idx}, Sample {i}: labels è {labels_type} (atteso Tensor) - "
+                            f"len={labels_len}, first_type={labels_first_type}"
+                        )
+                    elif torch.is_tensor(target["labels"]):
+                        labels_shape = target["labels"].shape
+                        labels_dtype = target["labels"].dtype
+                        logging.info(
+                            f"✅ P0 Fix - Batch {batch_idx}, Sample {i}: labels è Tensor - "
+                            f"shape={labels_shape}, dtype={labels_dtype}"
+                        )
+                
+                if "is_crowd" in target:
+                    is_crowd_type = type(target["is_crowd"])
+                    if isinstance(target["is_crowd"], list):
+                        is_crowd_len = len(target["is_crowd"])
+                        is_crowd_first_type = type(target["is_crowd"][0]) if is_crowd_len > 0 else None
+                        logging.warning(
+                            f"⚠️ P0 Fix - Batch {batch_idx}, Sample {i}: is_crowd è {is_crowd_type} (atteso Tensor) - "
+                            f"len={is_crowd_len}, first_type={is_crowd_first_type}"
+                        )
+                    elif torch.is_tensor(target["is_crowd"]):
+                        is_crowd_shape = target["is_crowd"].shape
+                        is_crowd_dtype = target["is_crowd"].dtype
+                        logging.info(
+                            f"✅ P0 Fix - Batch {batch_idx}, Sample {i}: is_crowd è Tensor - "
+                            f"shape={is_crowd_shape}, dtype={is_crowd_dtype}"
+                        )
+                
                 if "ood_mask" in target:
                     ood_mask = target["ood_mask"]
                     h, w = ood_mask.shape

@@ -14,6 +14,44 @@ from torch import nn, Tensor
 from typing import Any, Union, Optional
 
 
+def _to_1d_tensor(x: Any, dtype=None, device=None) -> Tensor:
+    """
+    Normalizza input a Tensor 1D.
+    Gestisce sia Tensor [N] che liste di Tensor scalari o scalari Python.
+    
+    Args:
+        x: Input che può essere Tensor [N], lista di Tensor/scalari, o scalare
+        dtype: Dtype target (opzionale)
+        device: Device target (opzionale)
+    
+    Returns:
+        Tensor 1D [N]
+    """
+    # Se è una lista, convertila in Tensor
+    if isinstance(x, list):
+        if len(x) == 0:
+            # Lista vuota → Tensor vuoto
+            if dtype is not None:
+                return torch.empty(0, dtype=dtype, device=device) if device else torch.empty(0, dtype=dtype)
+            return torch.empty(0, device=device) if device else torch.empty(0)
+        # Stack degli elementi (gestisce sia Tensor che scalari)
+        x = torch.stack([t if torch.is_tensor(t) else torch.tensor(t) for t in x])
+    
+    # Se è un Tensor, assicurati che sia almeno 1D
+    if torch.is_tensor(x):
+        if x.dim() == 0:
+            x = x.unsqueeze(0)
+        # Converti dtype/device se specificati
+        if dtype is not None:
+            x = x.to(dtype=dtype)
+        if device is not None:
+            x = x.to(device=device)
+        return x
+    
+    # Fallback: se è uno scalare Python, convertilo a Tensor
+    return torch.tensor([x], dtype=dtype, device=device)
+
+
 class Transforms(nn.Module):
     def __init__(
         self,
@@ -105,6 +143,9 @@ class Transforms(nn.Module):
         """
         Filter target entries by boolean mask.
         
+        🔧 P0 Fix: Normalizza labels/is_crowd a Tensor prima di filtrare,
+        per evitare crash quando diventano liste durante le trasformazioni.
+        
         Args:
             target: Target dictionary
             keep: Boolean mask with shape [N] for filtering arrays of masks/labels
@@ -120,8 +161,12 @@ class Transforms(nn.Module):
         # Fields to exclude from filtering (pixel-wise, not arrays)
         exclude_from_filter = {"ood_mask"}  # ood_mask is [H, W], not [N, H, W]
         
-        # Convert keep tensor to list of indices for Python list indexing
-        keep_indices = keep.nonzero(as_tuple=False).squeeze(-1).tolist() if isinstance(keep, Tensor) else keep
+        # 🔧 P0 Fix: Normalizza labels/is_crowd a Tensor prima di filtrare
+        # Questo evita crash quando diventano liste durante le trasformazioni
+        if "labels" in target:
+            target["labels"] = _to_1d_tensor(target["labels"], dtype=torch.long)
+        if "is_crowd" in target:
+            target["is_crowd"] = _to_1d_tensor(target["is_crowd"], dtype=torch.bool)
         
         for k, v in target.items():
             if k in exclude_from_filter:
@@ -131,9 +176,13 @@ class Transforms(nn.Module):
                 # Apply filtering for array fields (masks, labels, is_crowd)
                 if isinstance(v, (list, tuple)):
                     # For Python lists/tuples, use list comprehension with keep_indices
+                    keep_indices = keep.nonzero(as_tuple=False).squeeze(-1).tolist() if isinstance(keep, Tensor) else keep
                     filtered[k] = [v[i] for i in keep_indices]
+                elif torch.is_tensor(v):
+                    # Handle tensors directly (labels/is_crowd ora sono Tensor garantiti)
+                    filtered[k] = v[keep]
                 else:
-                    # For tensors/TVTensors, use boolean indexing
+                    # Fallback: use wrap for TVTensors or other types
                     filtered[k] = wrap(v[keep], like=v)
         
         return filtered
