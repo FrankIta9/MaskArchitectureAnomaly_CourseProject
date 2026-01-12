@@ -102,9 +102,10 @@ def main():
     total_batches = 0
     batches_with_ood = 0
     ood_ratios = []  # Lista di ood_ratio per ogni batch con OOD
+    overlap_ratios = []  # P0 - Problema #1: Lista di overlap_ratio per ogni batch con OOD
     
     # Esempi con OOD (per overlay)
-    ood_examples = []  # Lista di (batch_idx, sample_idx, img, ood_mask)
+    ood_examples = []  # Lista di (batch_idx, sample_idx, img, ood_mask, overlap_ratio)
     
     for batch_idx, batch in enumerate(dataloader):
         if total_batches >= args.num_batches:
@@ -125,6 +126,22 @@ def main():
             
             ood_mask = target["ood_mask"]  # [H, W]
             
+            # P0 - Problema #1: Check overlap_ratio (OOD vs GT)
+            overlap_ratio = None
+            if "masks" in target and target["masks"].numel() > 0:
+                # gt_union = OR di tutte le target["masks"] (shape [H,W])
+                gt_union = target["masks"].any(dim=0)  # [H, W] bool
+                # overlap = (ood_mask==1) & gt_union
+                overlap = (ood_mask == 1) & gt_union
+                # overlap_ratio = overlap.sum / (ood_mask==1).sum
+                ood_pixels_count = (ood_mask == 1).sum().item()
+                if ood_pixels_count > 0:
+                    overlap_ratio = overlap.sum().item() / ood_pixels_count
+                else:
+                    overlap_ratio = 0.0
+            else:
+                overlap_ratio = 0.0  # No GT masks available
+            
             # Calcola statistiche
             unique_values, counts = torch.unique(ood_mask, return_counts=True)
             unique_list = unique_values.tolist()
@@ -144,9 +161,13 @@ def main():
                     ood_ratio = ood_pixels / valid_pixels
                     ood_ratios.append(ood_ratio)
                     
+                    # P0 - Problema #1: Accumula overlap_ratio
+                    if overlap_ratio is not None:
+                        overlap_ratios.append(overlap_ratio)
+                    
                     # Salva esempio con OOD (max 3)
                     if len(ood_examples) < 3:
-                        ood_examples.append((batch_idx, sample_idx, img, ood_mask))
+                        ood_examples.append((batch_idx, sample_idx, img, ood_mask, overlap_ratio))
             
             total_batches += 1
             
@@ -195,6 +216,57 @@ def main():
         print(f"  P90: {ood_ratio_p90:.6f}")
         print(f"  P99: {ood_ratio_p99:.6f}")
         print()
+    
+    # P0 - Problema #1: Calcola overlap_ratio statistics (OOD vs GT)
+    if len(overlap_ratios) > 0:
+        overlap_ratio_min = min(overlap_ratios)
+        overlap_ratio_mean = np.mean(overlap_ratios)
+        overlap_ratio_max = max(overlap_ratios)
+        overlap_ratio_std = np.std(overlap_ratios)
+        
+        # Percentili (P50, P90, P99)
+        overlap_ratio_p50 = np.percentile(overlap_ratios, 50)
+        overlap_ratio_p90 = np.percentile(overlap_ratios, 90)
+        overlap_ratio_p99 = np.percentile(overlap_ratios, 99)
+        
+        print(f"{'='*60}")
+        print("⚠️  P0 - Problema #1: Overlap Ratio (OOD vs GT)")
+        print(f"{'='*60}")
+        print(f"Overlap Ratio (frazione pixel OOD che sovrappongono GT):")
+        print(f"  Min: {overlap_ratio_min:.6f}")
+        print(f"  Mean: {overlap_ratio_mean:.6f}")
+        print(f"  Max: {overlap_ratio_max:.6f}")
+        print(f"  Std: {overlap_ratio_std:.6f}")
+        print(f"  P50 (median): {overlap_ratio_p50:.6f}")
+        print(f"  P90: {overlap_ratio_p90:.6f}")
+        print(f"  P99: {overlap_ratio_p99:.6f}")
+        print()
+        
+        # Warning se overlap_ratio è troppo alto
+        if overlap_ratio_mean > 0.10:
+            print(f"❌ CRITICO: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.10 (10%)")
+            print(f"⚠️  Questo indica un conflitto strutturale: OOD pasted sovrappone GT Cityscapes!")
+            print(f"⚠️  La loss supervisionata spinge a classificare pixel OOD come classi Cityscapes,")
+            print(f"⚠️  mentre energy/OE vuole che siano 'fuori distribuzione' (alta energia).")
+            print(f"⚠️  Questo conflitto può far peggiorare i punteggi su OOD e anche su ID.")
+            print()
+            if overlap_ratio_mean > 0.30:
+                print(f"🔥 ESTREMAMENTE CRITICO: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.30 (30%)")
+                print(f"🔥 È praticamente garantito che stai sabotando il training!")
+                print()
+        elif overlap_ratio_mean > 0.05:
+            print(f"⚠️  WARNING: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.05 (5%)")
+            print(f"⚠️  Considera di rimuovere pixel pasted dalle maschere GT.")
+            print()
+        else:
+            print(f"✅ Overlap ratio medio ({overlap_ratio_mean:.4f}) <= 0.10 (10%) - OK")
+            print()
+    else:
+        print(f"{'='*60}")
+        print("⚠️  P0 - Problema #1: Overlap Ratio (OOD vs GT)")
+        print(f"{'='*60}")
+        print("⚠️  Nessun overlap_ratio calcolato (nessun batch con OOD e GT masks)")
+        print()
     else:
         print("❌ ERRORE: Nessun batch con OOD trovato!")
         print("⚠️  Questo significa che il paste COCO non sta funzionando!")
@@ -208,7 +280,7 @@ def main():
     print("📸 Esempi con OOD (primi 3):")
     print(f"{'='*60}\n")
     
-    for example_idx, (batch_idx, sample_idx, img, ood_mask) in enumerate(ood_examples):
+    for example_idx, (batch_idx, sample_idx, img, ood_mask, overlap_ratio) in enumerate(ood_examples):
         # Calcola statistiche
         unique_values, counts = torch.unique(ood_mask, return_counts=True)
         unique_list = unique_values.tolist()
@@ -222,6 +294,10 @@ def main():
         print(f"  ood_mask unique values: {unique_list}")
         print(f"  ood_mask counts: {counts_list}")
         print(f"  ood_ratio: {ood_ratio:.6f} ({ood_pixels}/{valid_pixels} pixel)")
+        if overlap_ratio is not None:
+            print(f"  overlap_ratio (OOD vs GT): {overlap_ratio:.6f}")
+            if overlap_ratio > 0.10:
+                print(f"  ⚠️  WARNING: Overlap ratio alto! Conflitto OOD vs GT.")
         print()
         
         # Salva overlay PNG

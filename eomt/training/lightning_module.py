@@ -329,12 +329,44 @@ class LightningModule(lightning.LightningModule):
         }
 
     def forward(self, imgs):
-        x = imgs / 255.0
-
+        # P0 - Problema #2: Normalizzazione ImageNet (mean/std) per backbone DINOv2/ViT
+        # Il backbone pretrain si aspetta input normalizzati con mean/std ImageNet
+        x = imgs.float() / 255.0
+        
+        # Normalizzazione ImageNet (mean/std)
+        # Mean e std sono standard per ImageNet pretraining (usati da DINOv2/ViT)
+        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+        x = (x - mean) / std
+        
         return self.network(x)
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
+        
+        # P0 - Problema #2: Sanity check normalizzazione (solo primi 3 batch)
+        if batch_idx < 3:
+            # Forward pass per ottenere x normalizzato
+            x = imgs.float() / 255.0
+            mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+            x_normalized = (x - mean) / std
+            
+            # Log statistiche normalizzazione
+            logging.info(
+                f"📊 P0 - Problema #2 - Batch {batch_idx}: Normalizzazione ImageNet - "
+                f"x_min={x_normalized.min().item():.4f}, "
+                f"x_max={x_normalized.max().item():.4f}, "
+                f"x_mean={x_normalized.mean().item():.4f}, "
+                f"x_std={x_normalized.std().item():.4f}"
+            )
+            # Log per canale (RGB)
+            for c in range(3):
+                channel_mean = x_normalized[:, c].mean().item()
+                channel_std = x_normalized[:, c].std().item()
+                logging.info(
+                    f"  Canale {c}: mean={channel_mean:.4f}, std={channel_std:.4f}"
+                )
         
         # Task 1: Print ood_mask for first 3 batches + overlay check
         if self._ood_mask_print_count < 3:
