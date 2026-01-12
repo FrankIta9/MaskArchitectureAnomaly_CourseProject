@@ -758,6 +758,19 @@ class OutlierExposureTransform(nn.Module):
         # Add ood_mask to target
         target["ood_mask"] = ood_mask
         
+        # 2) Hook immediato: dopo il paste, assert che l'ood_mask sia > 0
+        s = int(target["ood_mask"].sum().item())
+        if s == 0:
+            print("❌ OOD_MASK still zero right after paste!")
+            print(f"   paste_mask any: {bool(cumulative_paste_mask.any().item())}")
+            print(f"   paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
+            print(f"   ood_mask dtype: {target['ood_mask'].dtype}")
+            print(f"   ood_mask unique: {torch.unique(target['ood_mask']).tolist()[:10]}")
+            print(f"   ood_mask shape: {target['ood_mask'].shape}")
+            print(f"   cumulative_paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
+            print(f"   cumulative_paste_mask dtype: {cumulative_paste_mask.dtype}")
+            # Non facciamo assert qui, solo print per vedere cosa succede
+        
         # Store paste reality check counters in target for logging in lightning_module
         if self._log_reality_check:
             target["_oe_reality_check"] = {

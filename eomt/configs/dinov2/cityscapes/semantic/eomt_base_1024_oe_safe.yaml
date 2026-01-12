@@ -45,12 +45,13 @@ trainer:
         save_weights_only: false  # Salva anche optimizer state per permettere resume
         every_n_epochs: 1
   
-  logger:
-    class_path: lightning.pytorch.loggers.wandb.WandbLogger
-    init_args:
-      resume: allow
-      project: "eomt"
-      name: "OE+Energy_Safe_warmup6_lr1e5"
+  # DEBUG: Wandb disabilitato per evitare GraphQL retry e stacktrace pulita
+  # logger:
+  #   class_path: lightning.pytorch.loggers.wandb.WandbLogger
+  #   init_args:
+  #     resume: allow
+  #     project: "eomt"
+  #     name: "OE+Energy_Safe_warmup6_lr1e5"
 
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
@@ -100,7 +101,7 @@ data:
     
     # Batch size (config "safe" per batch_size 2 con accumulate_grad_batches 2)
     batch_size: 2
-    num_workers: 4
+    num_workers: 0  # DEBUG: 0 per stacktrace pulita e debug lineare
     
     # IMPORTANTE: 1024x1024 per compatibilità con i pesi pre-addestrati
     img_size: [1024, 1024]

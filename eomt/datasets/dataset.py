@@ -226,6 +226,17 @@ class Dataset(torch.utils.data.Dataset):
 
         if self.transforms is not None:
             img, target = self.transforms(img, target)
+            
+            # 3) Secondo hook: subito dopo self.transforms
+            if "ood_mask" in target:
+                s = int(target["ood_mask"].sum().item())
+                if s == 0:
+                    print("⚠️ after transforms: ood_mask sum=0")
+                    print(f"   ood_mask dtype: {target['ood_mask'].dtype}")
+                    print(f"   ood_mask shape: {target['ood_mask'].shape}")
+                    print(f"   ood_mask unique: {torch.unique(target['ood_mask']).tolist()[:10]}")
+                else:
+                    print(f"✅ after transforms: ood_mask sum={s}")
 
         return img, target
 

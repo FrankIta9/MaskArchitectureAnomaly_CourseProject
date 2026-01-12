@@ -145,6 +145,11 @@ class Transforms(nn.Module):
         if "semseg" in target:
             semseg = target["semseg"]
             target["semseg"] = F.pad(semseg, padding, fill=255)
+        
+        # 4) Cerca reset di ood_mask: pad() DEVE preservare ood_mask
+        if "ood_mask" in target:
+            ood_mask = target["ood_mask"]
+            target["ood_mask"] = F.pad(ood_mask, padding, fill=0)  # Padding = 0 (ID)
 
         # NEW: valid_mask - 1 dove c'era immagine originale, 0 dove è padding
         valid = torch.zeros((self.img_size[-2], self.img_size[-1]), dtype=torch.bool, device=img.device)
