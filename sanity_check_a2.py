@@ -10,6 +10,7 @@ Uso:
 import sys
 import os
 import torch
+import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -132,7 +133,25 @@ def main():
             if "masks" in target and target["masks"].numel() > 0:
                 # gt_union = OR di tutte le target["masks"] (shape [H,W])
                 gt_union = target["masks"].any(dim=0)  # [H, W] bool
-                # overlap = (ood_mask==1) & gt_union
+                
+                # Fix: Forza gt_union alla stessa shape di ood_mask
+                # ood_mask: [H, W] (uint8)
+                # gt_union: [H2, W2] (bool or uint8)
+                H, W = ood_mask.shape[-2], ood_mask.shape[-1]
+                
+                if gt_union.shape[-2:] != (H, W):
+                    # porta gt_union a [1,1,H2,W2] float, resize nearest, torna bool
+                    gt_union_rs = gt_union.to(torch.float32)[None, None, ...]
+                    gt_union_rs = F.interpolate(gt_union_rs, size=(H, W), mode="nearest")
+                    gt_union = gt_union_rs[0, 0].to(torch.bool)
+                
+                # Log essenziale (solo una volta, primo batch)
+                if batch_idx == 0 and sample_idx == 0:
+                    print(f"🔍 Debug shape (batch 0, sample 0):")
+                    print(f"  ood_mask: {tuple(ood_mask.shape)}, dtype={ood_mask.dtype}")
+                    print(f"  gt_union: {tuple(gt_union.shape)}, dtype={gt_union.dtype}")
+                
+                # ora non crasha
                 overlap = (ood_mask == 1) & gt_union
                 # overlap_ratio = overlap.sum / (ood_mask==1).sum
                 ood_pixels_count = (ood_mask == 1).sum().item()
