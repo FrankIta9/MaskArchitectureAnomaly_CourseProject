@@ -264,6 +264,22 @@ class OutlierExposureTransform(nn.Module):
         # Get drivable mask once for all objects
         drivable_mask = self._get_drivable_mask(target, h, w)
         
+        # Fix: Escludi pixel padding/letterbox (semseg == 255) dal sampling
+        # Questo evita OOD "nel vuoto" nero che può insegnare scorciatoie al modello
+        if drivable_mask is not None and "semseg" in target:
+            IGNORE = 255
+            valid_semseg = (target["semseg"] != IGNORE)  # [H, W] bool
+            # Assicura stessa shape di drivable_mask
+            if valid_semseg.shape != drivable_mask.shape:
+                # Resize valid_semseg a drivable_mask shape (nearest)
+                valid_semseg_rs = valid_semseg.to(torch.float32)[None, None, ...]
+                valid_semseg_rs = F.interpolate(valid_semseg_rs, size=drivable_mask.shape[-2:], mode="nearest")
+                valid_semseg = valid_semseg_rs[0, 0].to(torch.bool)
+            # Combina: drivable AND not padding
+            drivable_mask = drivable_mask & valid_semseg
+            if not drivable_mask.any():
+                drivable_mask = None  # Nessuna posizione valida
+        
         # Accumulate paste_mask from all pasted objects
         cumulative_paste_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
         
