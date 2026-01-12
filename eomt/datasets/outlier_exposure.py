@@ -627,9 +627,12 @@ class OutlierExposureTransform(nn.Module):
                 
                 # CRITICAL INVARIANT: ood_mask==1 -> semseg==255 (sempre)
                 ood_not_ignore = (ood_mask_bool & (semseg != 255)).sum().item()
+                
+                # Definisci ood_semseg sempre (anche se ood_not_ignore == 0)
+                ood_semseg = semseg[ood_mask_bool]
+                
                 if ood_not_ignore > 0:
                     import warnings
-                    ood_semseg = semseg[ood_mask_bool]
                     unique_ood_semseg = torch.unique(ood_semseg).tolist()
                     warnings.warn(
                         f"⚠️ CRITICAL Invariant violation: {ood_not_ignore} OOD pixels have semseg != 255! "
@@ -643,6 +646,7 @@ class OutlierExposureTransform(nn.Module):
                     ood_has_mappable = (ood_semseg.unsqueeze(0) == torch.tensor(list(mappable_trainids), device=ood_semseg.device).unsqueeze(1)).any(dim=0).any()
                     if ood_has_mappable:
                         import warnings
+                        unique_ood_semseg = torch.unique(ood_semseg).tolist()
                         warnings.warn(
                             f"⚠️ Invariant violation: ood_mask==1 has mappable trainIds! "
                             f"Unique values in OOD region: {unique_ood_semseg}"
