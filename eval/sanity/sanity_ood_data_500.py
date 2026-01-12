@@ -33,7 +33,8 @@ from collections import defaultdict
 # SETUP PATH - Aggiungi eomt/ al Python path per gli import
 # ============================================================================
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(CURRENT_DIR)))
+# Risali di 2 livelli: eval/sanity/ -> eval/ -> project_root/
+PROJECT_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
 EOMT_ROOT = os.path.join(PROJECT_ROOT, "eomt")
 
 if EOMT_ROOT not in sys.path:
