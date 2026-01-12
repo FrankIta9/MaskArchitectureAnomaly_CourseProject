@@ -544,6 +544,21 @@ class LightningModule(lightning.LightningModule):
                                 f"attempted_ood={attempted_ood} but pasted_ood={pasted_ood} is low! "
                                 f"skipped_write0={skipped_write0}, skipped_overlap={skipped_overlap}"
                             )
+                    
+                    # 2b. Paste debug (write_mask_ratio, ignore_ratio_patch, skip_reason)
+                    if "_oe_paste_debug" in target:
+                        paste_debug_list = target["_oe_paste_debug"]
+                        for obj_idx, paste_debug in enumerate(paste_debug_list):
+                            write_mask_ratio = paste_debug.get("write_mask_ratio", None)
+                            ignore_ratio_patch = paste_debug.get("ignore_ratio_patch", None)
+                            skip_reason = paste_debug.get("skip_reason", None)
+                            
+                            logging.info(
+                                f"📊 Paste Debug - Batch {batch_idx}, Sample {sample_idx}, Obj {obj_idx}: "
+                                f"write_mask_ratio={write_mask_ratio:.4f if write_mask_ratio is not None else 'N/A'}, "
+                                f"ignore_ratio_patch={ignore_ratio_patch:.4f if ignore_ratio_patch is not None else 'N/A'}, "
+                                f"skip_reason={skip_reason if skip_reason else 'None'}"
+                            )
         
         if targets and "ood_mask" in targets[0]:
             for target in targets:
@@ -1666,10 +1681,25 @@ class LightningModule(lightning.LightningModule):
         for target in targets:
             # Usa semseg se disponibile (più efficiente e corretto)
             if "semseg" in target:
-                # semseg è già per-pixel con ignore_index gestito
                 per_pixel_target = target["semseg"].clone()
-                # Assicurati che ignore_idx sia 255 (o quello che è stato usato)
-                # Se semseg ha già ignore gestito, usa direttamente
+
+                # NEW: ignore OOD pixels in metrics/eval targets
+                if "ood_mask" in target:
+                    ood = target["ood_mask"]
+                    # robust: allow uint8/bool, squeeze if needed
+                    if ood.dtype != torch.bool:
+                        ood = (ood != 0)
+                    # ensure same HxW
+                    if ood.shape != per_pixel_target.shape:
+                        # nearest resize if mismatch (shouldn't happen, but safe)
+                        ood_rs = ood.to(torch.float32)[None, None, ...]
+                        ood_rs = F.interpolate(
+                            ood_rs, size=per_pixel_target.shape[-2:], mode="nearest"
+                        )
+                        ood = ood_rs[0, 0].to(torch.bool)
+
+                    per_pixel_target[ood] = ignore_idx
+
                 per_pixel_targets.append(per_pixel_target)
             else:
                 # Fallback: costruisci da masks e labels (metodo vecchio)
@@ -1682,6 +1712,19 @@ class LightningModule(lightning.LightningModule):
 
                 for i, mask in enumerate(target["masks"]):
                     per_pixel_target[mask] = target["labels"][i]
+
+                # NEW: ignore OOD pixels also in fallback path
+                if "ood_mask" in target:
+                    ood = target["ood_mask"]
+                    if ood.dtype != torch.bool:
+                        ood = (ood != 0)
+                    if ood.shape != per_pixel_target.shape:
+                        ood_rs = ood.to(torch.float32)[None, None, ...]
+                        ood_rs = F.interpolate(
+                            ood_rs, size=per_pixel_target.shape[-2:], mode="nearest"
+                        )
+                        ood = ood_rs[0, 0].to(torch.bool)
+                    per_pixel_target[ood] = ignore_idx
 
                 per_pixel_targets.append(per_pixel_target)
 

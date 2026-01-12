@@ -237,24 +237,7 @@ class OutlierExposureTransform(nn.Module):
                 self._debug_shape_count += 1
             
             # OVERLAP POLICY: Check overlap with existing GT before pasting
-            # (Safety check, ma con FIX 1 diventa quasi superfluo)
-            if "semseg" in target:
-                semseg = target["semseg"]  # [H, W] LongTensor
-                # Get object region in full image coordinates
-                obj_region_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
-                obj_region_mask[y:y_end, x:x_end] = obj_mask_resized
-                
-                # Check overlap with existing valid GT (semseg != 255)
-                existing_gt = (semseg != 255)
-                overlap = obj_region_mask & existing_gt
-                overlap_ratio = overlap.sum().float() / max(1, obj_region_mask.sum().float())
-                
-                # Skip if overlap exceeds threshold (to avoid corrupting labels)
-                # Con FIX 1 questo diventa quasi superfluo, ma mantienilo come safety
-                if overlap_ratio > self.max_overlap_ratio:
-                    if self._log_reality_check:
-                        self._skipped_overlap += 1
-                    return img, target, paste_mask, False  # Skip this object
+            # (Spostato dopo write_mask calculation per usare write_mask invece di obj_mask_resized)
             
             # Clone image and target for modification
             img_clone = img.clone()
@@ -293,60 +276,81 @@ class OutlierExposureTransform(nn.Module):
             # FIX 1: Scrittura SOLO su pixel già IGNORE (semseg==255) + valid_mask
             # FIX 2: Elimina doppio indexing usando patch locale
             # FIX 3: paste_mask deve essere esattamente write_mask (non obj_mask_resized)
+            # Scelta A: OE "vero" senza corrompere ID - write_mask = obj_mask & valid_mask (no semseg==255 constraint)
             
-            write_mask = None
+            write_mask = obj_mask_resized.clone()
+            
+            # Constraint: solo valid_mask (no padding/letterbox)
+            if "valid_mask" in target:
+                vm_patch = target["valid_mask"][y:y_end, x:x_end].to(torch.bool)
+                write_mask = write_mask & vm_patch
+            
+            # Log per debug (primi 100 batch)
+            write_mask_ratio = write_mask.sum().float() / max(1, obj_mask_resized.sum().float())
+            skip_reason = None
+            
+            # Fail-fast: se write_mask è vuoto, skip questo oggetto
+            if write_mask.sum() == 0:
+                if self._log_reality_check:
+                    self._skipped_write0 += 1
+                    skip_reason = "write_mask_empty"
+                return img, target, paste_mask, False  # Skip oggetto (non ha scritto niente)
+            
+            # Overlap policy: check overlap with existing GT (solo per OOD, ID può sovrascrivere)
+            if category_name not in COCO_TO_CS_TRAINID and "semseg" in target:
+                # Extract patch per overlap check
+                semseg_patch = target["semseg"][y:y_end, x:x_end]  # [H_patch, W_patch]
+                existing_gt = (semseg_patch != 255)
+                overlap = write_mask & existing_gt
+                overlap_ratio = overlap.sum().float() / max(1, write_mask.sum().float())
+                
+                if overlap_ratio > self.max_overlap_ratio:
+                    if self._log_reality_check:
+                        self._skipped_overlap += 1
+                        skip_reason = f"overlap_too_high_{overlap_ratio:.3f}"
+                    return img, target, paste_mask, False  # Skip oggetto (overlap troppo alto)
+            
+            # FIX 2: Usa patch locale invece di doppio indexing
             if "semseg" in target:
-                # Extract patch
                 semseg_patch = target["semseg"][y:y_end, x:x_end].clone()  # [H_patch, W_patch]
                 
-                # FIX 1: Write mask = solo pixel IGNORE (255) + valid_mask se presente
-                write_mask = obj_mask_resized & (semseg_patch == 255)
-                
-                # Opzionale: se hai valid_mask, ancora meglio
-                if "valid_mask" in target:
-                    vm_patch = target["valid_mask"][y:y_end, x:x_end].to(torch.bool)
-                    write_mask = write_mask & vm_patch
-                
-                # Fail-fast: se write_mask è vuoto, skip questo oggetto
-                if write_mask.sum() == 0:
-                    if self._log_reality_check:
-                        self._skipped_write0 += 1
-                    return img, target, paste_mask, False  # Skip oggetto (non ha scritto niente)
-                
-                # FIX 2: Usa patch locale invece di doppio indexing
                 if category_name in COCO_TO_CS_TRAINID:
                     # ID AUGMENTATION: Mappable category → supervised paste
                     cs_trainid = COCO_TO_CS_TRAINID[category_name]
-                    # Scrivi solo dove semseg era 255 (IGNORE)
+                    # Scrivi su write_mask (può sovrascrivere pixel validi, ok per ID augmentation)
                     semseg_patch[write_mask] = cs_trainid
                     target["semseg"][y:y_end, x:x_end] = semseg_patch
                     # ood_mask stays 0 (not set to 1)
                 else:
                     # OOD AUGMENTATION: Non-mappable category → outlier exposure
-                    # Scrivi 255 solo dove era già 255 (di fatto non cambia, ma mantiene invariante)
-                    semseg_patch[write_mask] = 255
-                    target["semseg"][y:y_end, x:x_end] = semseg_patch
-                    # ood_mask will be set to 1 in forward() based on paste_mask
-            else:
-                # Se non c'è semseg, usa obj_mask_resized come fallback
-                write_mask = obj_mask_resized
+                    # NON scrivere su semseg (lascia invariato) - ood_mask gestirà l'ignore nelle metriche
+                    # semseg rimane invariato, ood_mask sarà 1 per questi pixel
+                    pass
             
             # FIX 3: paste_mask deve essere esattamente write_mask (non obj_mask_resized)
             # Questo garantisce che paste_mask == pixel dove abbiamo scritto davvero
-            # Per OOD: paste_mask == write_mask == pixel dove semseg==255
-            # Per ID: paste_mask == write_mask == pixel dove abbiamo scritto trainId
-            if write_mask is not None:
-                paste_mask[y:y_end, x:x_end] = paste_mask[y:y_end, x:x_end] | write_mask
+            # Per OOD: paste_mask == write_mask (pixel validi dove abbiamo incollato)
+            # Per ID: paste_mask == write_mask (pixel validi dove abbiamo scritto trainId)
+            paste_mask[y:y_end, x:x_end] = paste_mask[y:y_end, x:x_end] | write_mask
+            
+            # Log per debug (primi 100 batch)
+            if self._log_reality_check and skip_reason is None:
+                # Log write_mask_ratio, ignore_ratio_patch (se semseg presente)
+                ignore_ratio_patch = None
+                if "semseg" in target:
+                    semseg_patch = target["semseg"][y:y_end, x:x_end]
+                    ignore_pixels = (semseg_patch == 255).sum().item()
+                    total_patch = semseg_patch.numel()
+                    ignore_ratio_patch = ignore_pixels / max(1, total_patch)
                 
-                # Assert post-condizione: per OOD paste, paste_mask deve essere subset di write_mask
-                if category_name not in COCO_TO_CS_TRAINID:
-                    paste_mask_patch = paste_mask[y:y_end, x:x_end]
-                    extra_pixels = (paste_mask_patch & ~write_mask).sum().item()
-                    if extra_pixels > 0:
-                        import warnings
-                        warnings.warn(
-                            f"⚠️ Post-condition violation: {extra_pixels} pixels in paste_mask but not in write_mask for OOD paste!"
-                        )
+                # Store in target for logging in lightning_module
+                if "_oe_paste_debug" not in target:
+                    target["_oe_paste_debug"] = []
+                target["_oe_paste_debug"].append({
+                    "write_mask_ratio": write_mask_ratio.item(),
+                    "ignore_ratio_patch": ignore_ratio_patch,
+                    "skip_reason": skip_reason,
+                })
             
             return img_clone, target, paste_mask, True  # Success
         
