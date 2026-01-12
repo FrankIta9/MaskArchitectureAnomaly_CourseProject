@@ -54,12 +54,16 @@ def compute_ood_placement_stats(ood_mask: torch.Tensor, h: int, w: int) -> Dict[
     """
     ood_pixels = (ood_mask == 1)
     if not ood_pixels.any():
-        # P0 Fix: Ritorna None invece di 0.0 per evitare che batch senza OOD ammazzino la mediana
+        # P0 Fix: Ritorna has_ood=False per evitare che batch senza OOD ammazzino la mediana
         return {
+            "has_ood": False,
             "ood_in_bottom_ratio": None,
             "ood_in_top_ratio": None,
             "ood_in_middle_ratio": None,
         }
+    
+    # Se c'è OOD, aggiungi has_ood=True
+    total_ood = ood_pixels.sum().item()
     
     total_ood = ood_pixels.sum().item()
     
@@ -78,6 +82,7 @@ def compute_ood_placement_stats(ood_mask: torch.Tensor, h: int, w: int) -> Dict[
     ood_in_middle_ratio = ood_in_middle / total_ood if total_ood > 0 else 0.0
     
     return {
+        "has_ood": True,
         "ood_in_bottom_ratio": ood_in_bottom_ratio,
         "ood_in_top_ratio": ood_in_top_ratio,
         "ood_in_middle_ratio": ood_in_middle_ratio,
@@ -356,10 +361,12 @@ def main():
                 
                 # S1: OOD placement (solo quando c'è OOD)
                 placement_stats = compute_ood_placement_stats(ood_mask, h, w)
-                if placement_stats["ood_in_bottom_ratio"] is not None:
-                    ood_in_bottom_ratios.append(placement_stats["ood_in_bottom_ratio"])
-                    ood_in_top_ratios.append(placement_stats["ood_in_top_ratio"])
-                    ood_in_middle_ratios.append(placement_stats["ood_in_middle_ratio"])
+                if not placement_stats.get("has_ood", True):  # Skip se has_ood=False
+                    continue
+                
+                ood_in_bottom_ratios.append(placement_stats["ood_in_bottom_ratio"])
+                ood_in_top_ratios.append(placement_stats["ood_in_top_ratio"])
+                ood_in_middle_ratios.append(placement_stats["ood_in_middle_ratio"])
                 
                 # S2: OOD size (solo quando c'è OOD)
                 size_stats = compute_ood_size_stats(ood_mask, h, w)
