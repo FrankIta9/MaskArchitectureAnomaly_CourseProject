@@ -700,40 +700,6 @@ class OutlierExposureTransform(nn.Module):
         else:
             return (None, None)  # No valid position
     
-    def _fallback_safe_position(
-        self, target: Dict[str, Any], obj_h: int, obj_w: int, h: int, w: int, y_min: int
-    ) -> Tuple[Optional[int], Optional[int]]:
-        """
-        Fallback safe: random position solo in valid_area e bottom band (y >= y_min).
-        Non piazza mai nel padding nero.
-        
-        Returns:
-            (x, y) position tuple or (None, None) if no valid position found
-        """
-        # valid area: preferisci target["valid_mask"] se c'è
-        if "valid_mask" in target:
-            valid_area = target["valid_mask"]
-        elif "semseg" in target:
-            valid_area = (target["semseg"] != 255)
-        else:
-            return (None, None)  # No valid area info, skip
-
-        # bottom constraint
-        valid_area = valid_area.clone()
-        valid_area[:y_min, :] = False
-
-        # Prova a campionare qualche punto valido
-        ysxs = torch.nonzero(valid_area, as_tuple=False)
-        if ysxs.numel() > 0:
-            idx = random.randint(0, ysxs.shape[0] - 1)
-            y, x = ysxs[idx].tolist()
-            # clamp per farci stare l'oggetto
-            x = min(x, max(0, w - obj_w))
-            y = min(y, max(y_min, h - obj_h))  # Ensure y >= y_min
-            return (x, y)
-        else:
-            return (None, None)  # No valid position
-    
     def _reset_placement_counters(self):
         """Reset placement counters (called at start of each epoch for logging)"""
         self.drivable_placement_count = 0
