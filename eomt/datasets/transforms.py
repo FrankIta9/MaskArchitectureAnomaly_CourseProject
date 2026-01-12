@@ -120,13 +120,21 @@ class Transforms(nn.Module):
         # Fields to exclude from filtering (pixel-wise, not arrays)
         exclude_from_filter = {"ood_mask"}  # ood_mask is [H, W], not [N, H, W]
         
+        # Convert keep tensor to list of indices for Python list indexing
+        keep_indices = keep.nonzero(as_tuple=False).squeeze(-1).tolist() if isinstance(keep, Tensor) else keep
+        
         for k, v in target.items():
             if k in exclude_from_filter:
                 # Skip filtering for pixel-wise fields
                 filtered[k] = v
             else:
                 # Apply filtering for array fields (masks, labels, is_crowd)
-                filtered[k] = wrap(v[keep], like=v)
+                if isinstance(v, (list, tuple)):
+                    # For Python lists/tuples, use list comprehension with keep_indices
+                    filtered[k] = [v[i] for i in keep_indices]
+                else:
+                    # For tensors/TVTensors, use boolean indexing
+                    filtered[k] = wrap(v[keep], like=v)
         
         return filtered
 
