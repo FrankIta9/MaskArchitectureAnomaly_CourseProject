@@ -156,7 +156,11 @@ class OutlierExposureTransform(nn.Module):
         self._pasted_ood = 0
         self._skipped_write0 = 0
         self._skipped_overlap = 0
+        self._skipped_no_position = 0
+        self._skipped_shape_mismatch = 0
+        self._skipped_alpha0 = 0
         self._log_reality_check = True  # Always enabled, logging controlled in lightning_module
+        self._paste_trace_enabled = False  # Enabled for first 50 batches
     
     def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor, str]:
         """
@@ -227,11 +231,17 @@ class OutlierExposureTransform(nn.Module):
             x_end = x + new_w
             y_end = y + new_h
             
+            # 5) Controllo shape invariants (obbligatorio)
+            expected_shape = (y_end - y, x_end - x)
+            if obj_mask_resized.shape != expected_shape:
+                if self._log_reality_check:
+                    self._skipped_shape_mismatch += 1
+                return img, target, paste_mask, False  # Skip: shape mismatch
+            
             # DEBUG: Assert shape coerenti (solo primi 200 batch)
             if not hasattr(self, '_debug_shape_count'):
                 self._debug_shape_count = 0
             if self._debug_shape_count < 200:
-                expected_shape = (y_end - y, x_end - x)
                 assert obj_mask_resized.shape == expected_shape, \
                     f"obj_mask_resized shape mismatch: got {obj_mask_resized.shape}, expected {expected_shape}"
                 self._debug_shape_count += 1
@@ -278,22 +288,46 @@ class OutlierExposureTransform(nn.Module):
             # FIX 3: paste_mask deve essere esattamente write_mask (non obj_mask_resized)
             # Scelta A: OE "vero" senza corrompere ID - write_mask = obj_mask & valid_mask (no semseg==255 constraint)
             
+            # 4) Controllo dtype: assicurati che paste_mask sia bool
+            if paste_mask.dtype != torch.bool:
+                paste_mask = paste_mask.bool()
+            
+            # Paste trace: valori prima della decisione
+            paste_mask_sum_before = paste_mask.sum().item()
+            obj_mask_sum = obj_mask_resized.sum().item()
+            vm_sum = None
+            semseg255_sum = None
+            
             write_mask = obj_mask_resized.clone()
             
             # Constraint: solo valid_mask (no padding/letterbox)
             if "valid_mask" in target:
                 vm_patch = target["valid_mask"][y:y_end, x:x_end].to(torch.bool)
+                vm_sum = vm_patch.sum().item()
                 write_mask = write_mask & vm_patch
             
-            # Log per debug (primi 100 batch)
-            write_mask_ratio = write_mask.sum().float() / max(1, obj_mask_resized.sum().float())
+            # Per paste trace: semseg255_sum (solo per info, non usato per decisione)
+            if "semseg" in target:
+                semseg_patch = target["semseg"][y:y_end, x:x_end]
+                semseg255_sum = (semseg_patch == 255).sum().item()
+            
+            write_sum = write_mask.sum().item()
             skip_reason = None
             
             # Fail-fast: se write_mask è vuoto, skip questo oggetto
-            if write_mask.sum() == 0:
+            if write_sum == 0:
                 if self._log_reality_check:
                     self._skipped_write0 += 1
-                    skip_reason = "write_mask_empty"
+                skip_reason = "write0"
+                
+                # Paste trace: log anche per skip
+                if self._paste_trace_enabled:
+                    import logging
+                    logging.info(
+                        f"🔍 Paste Trace (SKIP) - obj_mask_sum={obj_mask_sum}, vm_sum={vm_sum}, "
+                        f"semseg255_sum={semseg255_sum}, write_sum={write_sum}, skip_reason={skip_reason}"
+                    )
+                
                 return img, target, paste_mask, False  # Skip oggetto (non ha scritto niente)
             
             # Overlap policy: check overlap with existing GT (solo per OOD, ID può sovrascrivere)
@@ -307,7 +341,16 @@ class OutlierExposureTransform(nn.Module):
                 if overlap_ratio > self.max_overlap_ratio:
                     if self._log_reality_check:
                         self._skipped_overlap += 1
-                        skip_reason = f"overlap_too_high_{overlap_ratio:.3f}"
+                    skip_reason = "overlap"
+                    
+                    # Paste trace: log anche per skip
+                    if self._paste_trace_enabled:
+                        import logging
+                        logging.info(
+                            f"🔍 Paste Trace (SKIP) - obj_mask_sum={obj_mask_sum}, vm_sum={vm_sum}, "
+                            f"semseg255_sum={semseg255_sum}, write_sum={write_sum}, skip_reason={skip_reason}"
+                        )
+                    
                     return img, target, paste_mask, False  # Skip oggetto (overlap troppo alto)
             
             # FIX 2: Usa patch locale invece di doppio indexing
@@ -331,7 +374,32 @@ class OutlierExposureTransform(nn.Module):
             # Questo garantisce che paste_mask == pixel dove abbiamo scritto davvero
             # Per OOD: paste_mask == write_mask (pixel validi dove abbiamo incollato)
             # Per ID: paste_mask == write_mask (pixel validi dove abbiamo scritto trainId)
+            
+            # 2) Verifica che paste_mask sia davvero "solo oggetto" e che venga scritto sul globale
+            # Assicurati che write_mask sia bool
+            if write_mask.dtype != torch.bool:
+                write_mask = write_mask.bool()
+            
+            paste_mask_sum_after_before_assert = paste_mask.sum().item()
             paste_mask[y:y_end, x:x_end] = paste_mask[y:y_end, x:x_end] | write_mask
+            paste_mask_sum_after = paste_mask.sum().item()
+            
+            # Assert: paste_mask deve aumentare almeno di (write_mask.sum() - 5) pixel
+            # (tolleranza di 5 pixel per eventuali overlap con paste precedenti)
+            write_mask_sum_expected = write_mask.sum().item()
+            paste_mask_increase = paste_mask_sum_after - paste_mask_sum_before
+            assert paste_mask_increase >= write_mask_sum_expected - 5, \
+                f"paste_mask not written correctly: increase={paste_mask_increase}, expected>={write_mask_sum_expected - 5}"
+            
+            # 1) Paste trace: log sempre (solo per primi 50 batch)
+            if self._paste_trace_enabled:
+                import logging
+                logging.info(
+                    f"🔍 Paste Trace - obj_mask_sum={obj_mask_sum}, vm_sum={vm_sum}, "
+                    f"semseg255_sum={semseg255_sum}, write_sum={write_sum}, "
+                    f"paste_mask_before={paste_mask_sum_before}, paste_mask_after={paste_mask_sum_after}, "
+                    f"skip_reason={skip_reason if skip_reason else 'None'}"
+                )
             
             # Log per debug (primi 100 batch)
             if self._log_reality_check and skip_reason is None:
@@ -347,7 +415,7 @@ class OutlierExposureTransform(nn.Module):
                 if "_oe_paste_debug" not in target:
                     target["_oe_paste_debug"] = []
                 target["_oe_paste_debug"].append({
-                    "write_mask_ratio": write_mask_ratio.item(),
+                    "write_mask_ratio": write_mask_ratio.item() if 'write_mask_ratio' in locals() else None,
                     "ignore_ratio_patch": ignore_ratio_patch,
                     "skip_reason": skip_reason,
                 })
@@ -378,6 +446,15 @@ class OutlierExposureTransform(nn.Module):
         self._pasted_ood = 0
         self._skipped_write0 = 0
         self._skipped_overlap = 0
+        self._skipped_no_position = 0
+        self._skipped_shape_mismatch = 0
+        self._skipped_alpha0 = 0
+        
+        # Enable paste trace for first 50 batches
+        if not hasattr(self, '_paste_trace_batch_count'):
+            self._paste_trace_batch_count = 0
+        self._paste_trace_enabled = (self._paste_trace_batch_count < 50)
+        self._paste_trace_batch_count += 1
         
         # Initialize ood_mask: 0 = ID, 1 = OOD, 255 = ignore (opzionale)
         ood_mask = torch.zeros((h, w), dtype=torch.uint8, device=img.device)
@@ -534,6 +611,8 @@ class OutlierExposureTransform(nn.Module):
                                 y_min = int(0.7 * h)
                                 x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
                                 if x is None:
+                                    if self._log_reality_check:
+                                        self._skipped_no_position += 1
                                     continue  # Skip this object
                         else:
                             # Verifica che l'oggetto ci stia ancora nella posizione scelta
@@ -546,6 +625,8 @@ class OutlierExposureTransform(nn.Module):
                         y_min = int(0.7 * h)
                         x, y = self._fallback_safe_position(target, obj_h_est, obj_w_est, h, w, y_min)
                         if x is None:
+                            if self._log_reality_check:
+                                self._skipped_no_position += 1
                             continue  # Skip this object if no valid position
                         # Calcola scale anche per fallback
                         scale = self._apply_perspective_aware_scale(base_scale, y, h)
@@ -574,6 +655,8 @@ class OutlierExposureTransform(nn.Module):
                 # Fix: Usa fallback_safe_position anche qui per evitare padding
                 x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
                 if x is None:
+                    if self._log_reality_check:
+                        self._skipped_no_position += 1
                     continue  # Skip this object if no valid position
                 self.random_placement_count += 1
                 
@@ -598,8 +681,30 @@ class OutlierExposureTransform(nn.Module):
                 # For OOD paste: paste_mask indicates OOD pixels
                 # For ID paste: paste_mask is still tracked but ood_mask stays 0
                 if category_name not in COCO_TO_CS_TRAINID:
-                    # Only accumulate OOD paste_mask
+                    # 3) Verifica che cumulative_paste_mask si aggiorni davvero
+                    # 4) Controllo dtype: assicurati che paste_mask sia bool
+                    if paste_mask.dtype != torch.bool:
+                        paste_mask = paste_mask.bool()
+                    
+                    cumulative_sum_before = cumulative_paste_mask.sum().item()
+                    paste_mask_sum_for_cumulative = paste_mask.sum().item()
+                    
                     cumulative_paste_mask = cumulative_paste_mask | paste_mask
+                    cumulative_sum_after = cumulative_paste_mask.sum().item()
+                    
+                    # Assert: cumulative_paste_mask deve aumentare
+                    cumulative_increase = cumulative_sum_after - cumulative_sum_before
+                    assert cumulative_increase >= paste_mask_sum_for_cumulative - 5, \
+                        f"cumulative_paste_mask not updated correctly: increase={cumulative_increase}, expected>={paste_mask_sum_for_cumulative - 5}"
+                    
+                    # Paste trace: log cumulative (solo per OOD)
+                    if self._paste_trace_enabled:
+                        import logging
+                        logging.info(
+                            f"🔍 Paste Trace (CUMULATIVE) - cumulative_before={cumulative_sum_before}, "
+                            f"paste_mask_sum={paste_mask_sum_for_cumulative}, cumulative_after={cumulative_sum_after}"
+                        )
+                    
                     # Count successful OOD paste
                     if self._log_reality_check and success:
                         self._pasted_ood += 1
@@ -638,6 +743,11 @@ class OutlierExposureTransform(nn.Module):
         # Task 1: Build ood_mask: 1 = OOD (non-mappable pasted), 0 = ID (rest)
         # Note: ID paste (mappable) does NOT set ood_mask to 1 (it stays 0)
         # Only OOD paste (non-mappable) sets ood_mask to 1
+        
+        # 4) Controllo dtype: cumulative_paste_mask deve essere bool
+        if cumulative_paste_mask.dtype != torch.bool:
+            cumulative_paste_mask = cumulative_paste_mask.bool()
+        
         ood_mask = cumulative_paste_mask.to(torch.uint8)  # 1 = OOD, 0 = ID
         
         # Note: semseg is already updated in _paste_object:
@@ -655,6 +765,9 @@ class OutlierExposureTransform(nn.Module):
                 "pasted_ood": self._pasted_ood,
                 "skipped_write0": self._skipped_write0,
                 "skipped_overlap": self._skipped_overlap,
+                "skipped_no_position": self._skipped_no_position,
+                "skipped_shape_mismatch": self._skipped_shape_mismatch,
+                "skipped_alpha0": self._skipped_alpha0,
             }
         
         # DEBUG: Assert/warn per invarianti (solo primi 200 batch)
