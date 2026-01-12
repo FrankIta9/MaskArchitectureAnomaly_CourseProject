@@ -129,29 +129,76 @@ class MaskClassificationSemantic(LightningModule):
         
         # Log Energy Loss status at the start of each epoch
         if self.criterion.eim_enabled:
-            current_weight = self.criterion.energy_ood_loss.get_current_weight()
-            is_warmup = self.current_epoch < self.criterion.energy_ood_loss.warmup_epochs
+            energy_loss = self.criterion.energy_ood_loss
+            current_weight = energy_loss.get_current_weight()
+            effective_epoch = self.current_epoch - energy_loss.warmup_start_epoch
+            is_warmup = effective_epoch < energy_loss.warmup_epochs
+            
+            # Quick check: log obbligatori (una volta per epoca)
+            self.log("dbg/energy/current_epoch", float(self.current_epoch), on_step=False, on_epoch=False, sync_dist=False)
+            self.log("dbg/energy/warmup_start_epoch", float(energy_loss.warmup_start_epoch), on_step=False, on_epoch=False, sync_dist=False)
+            self.log("dbg/energy/effective_epoch", float(effective_epoch), on_step=False, on_epoch=False, sync_dist=False)
+            self.log("dbg/energy/weight", current_weight, on_step=False, on_epoch=False, sync_dist=False)
+            
+            # Log margins (m_in, m_out)
+            if hasattr(energy_loss, 'base_loss'):
+                base_loss = energy_loss.base_loss
+                if hasattr(base_loss, 'm_in') and base_loss.m_in is not None:
+                    self.log("dbg/energy/m_in", float(base_loss.m_in), on_step=False, on_epoch=False, sync_dist=False)
+                if hasattr(base_loss, 'm_out') and base_loss.m_out is not None:
+                    self.log("dbg/energy/m_out", float(base_loss.m_out), on_step=False, on_epoch=False, sync_dist=False)
             
             if is_warmup:
                 status_msg = (
                     f"🔵 Epoch {self.current_epoch}: Energy Loss DISABLED (warmup phase) "
-                    f"[{self.current_epoch}/{self.criterion.energy_ood_loss.warmup_epochs}]"
+                    f"[effective: {effective_epoch}/{energy_loss.warmup_epochs}]"
                 )
             else:
-                progress = ((self.current_epoch - self.criterion.energy_ood_loss.warmup_epochs) / 
-                           (self.criterion.energy_ood_loss.max_epochs - self.criterion.energy_ood_loss.warmup_epochs)) * 100
+                # Ramp progress calculation (coerente con get_current_weight)
+                denom = (energy_loss.max_epochs - 1) - energy_loss.warmup_epochs
+                if denom > 0:
+                    progress = ((effective_epoch - energy_loss.warmup_epochs) / denom) * 100
+                else:
+                    progress = 100.0
                 status_msg = (
                     f"🟢 Epoch {self.current_epoch}: Energy Loss ACTIVE "
-                    f"[weight: {current_weight:.6f}/{self.criterion.energy_ood_loss.max_weight:.6f}, "
+                    f"[effective: {effective_epoch}, weight: {current_weight:.6f}/{energy_loss.max_weight:.6f}, "
                     f"progress: {progress:.1f}%]"
                 )
             
             # Log to console (rank_zero_info for distributed training)
             logging.info(status_msg)
             
-            # Also log as metric for wandb/other loggers
+            # Also log as metric for wandb/other loggers (legacy)
             self.log("energy/epoch_weight", current_weight, sync_dist=False)
             self.log("energy/warmup_active", float(is_warmup), sync_dist=False)
+    
+    def on_train_epoch_end(self):
+        """Log epoch-level statistics for P0 monitoring."""
+        # I log con on_epoch=True sono già accumulati automaticamente da Lightning
+        # Qui logghiamo i valori aggregati con i nomi richiesti per il quick check
+        
+        # 7. dbg/energy_sep (già loggato per step, qui loggiamo anche per epoca come media)
+        # Lightning accumula automaticamente dbg/energy/sep con on_epoch=True
+        # Non serve fare nulla, è già disponibile
+        
+        # 8. dbg/ood/pct_batches_with_ood (percentuale batch con OOD nell'epoca)
+        # Calcolato da dbg/oe/paste_applied (0/1 per batch) - la media su epoca è la percentuale
+        # Lightning accumula automaticamente dbg/oe/paste_applied con on_epoch=True
+        # Non serve fare nulla, è già disponibile come media
+        
+        # 9. dbg/ood/ood_ratio_mean (media pixel OOD per batch con OOD)
+        # Lightning accumula automaticamente dbg/oe/ood_ratio con on_epoch=True
+        # Non serve fare nulla, è già disponibile come media
+        
+        # 10. dbg/energy/n_ood_pixels_used (quanti pixel OOD entrano nella loss)
+        # Lightning accumula automaticamente dbg/n_ood_pixels con on_epoch=True
+        # Non serve fare nulla, è già disponibile come somma/media
+        
+        # Nota: Lightning accumula automaticamente i valori loggati con on_epoch=True
+        # I valori sono già disponibili nei logger (wandb, tensorboard, ecc.)
+        # Qui possiamo eventualmente loggare versioni "rinominate" se necessario
+        pass
 
     def eval_step(
         self,

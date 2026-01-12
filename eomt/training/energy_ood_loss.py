@@ -447,34 +447,34 @@ class EnergyOODLossWithWarmup(nn.Module):
         """
         Compute current energy weight based on warmup schedule.
         
-        Task 5: Improved warmup schedule
-        - Hard off for warmup_epochs
-        - Then ramp (cosine or linear) to max_weight
-        - Uses warmup_start_epoch to account for virtual epoch offset when resuming
+        Versione corretta (consigliata):
+        - warmup hard-off per epoche 0..warmup_epochs-1
+        - ramp da warmup_epochs fino a max_epochs-1 incluso
+        - supporta resume con warmup_start_epoch = epoca da cui hai ripreso (offset)
         
         Returns:
             Current weight (0.0 during warmup, then gradually increases)
         """
-        # Adjust current epoch by warmup_start_epoch offset
-        adjusted_epoch = self.current_epoch + self.warmup_start_epoch
-        
-        if adjusted_epoch < self.warmup_epochs:
-            # Phase 1: Energy DISABLED (pure OE training)
+        # effective_epoch: 0 quando riparti (se warmup_start_epoch = current_epoch_at_resume)
+        effective_epoch = self.current_epoch - self.warmup_start_epoch
+
+        # Hard-off
+        if effective_epoch < self.warmup_epochs:
             return 0.0
-        
-        # Phase 2: Gradual warmup
-        progress = (adjusted_epoch - self.warmup_epochs) / (
-            self.max_epochs - self.warmup_epochs
-        )
-        progress = min(1.0, max(0.0, progress))  # Clamp [0, 1]
-        
+
+        # Ramp: vogliamo progress=1 all'ultima epoca reale (max_epochs-1)
+        denom = (self.max_epochs - 1) - self.warmup_epochs
+        if denom <= 0:
+            # caso limite: max_epochs troppo piccolo rispetto al warmup
+            return self.max_weight
+
+        progress = (effective_epoch - self.warmup_epochs) / denom
+        progress = max(0.0, min(1.0, progress))
+
         if self.warmup_schedule == "cosine":
-            # Cosine warmup: smooth increase
-            weight = self.max_weight * (1 - math.cos(progress * math.pi)) / 2
-        else:  # linear
-            weight = self.max_weight * progress
-            
-        return weight
+            return self.max_weight * (1 - math.cos(progress * math.pi)) / 2
+        else:
+            return self.max_weight * progress
         
     def forward(
         self,
