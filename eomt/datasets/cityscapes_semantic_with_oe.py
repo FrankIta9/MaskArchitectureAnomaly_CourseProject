@@ -71,6 +71,11 @@ class CityscapesSemanticWithOE(LightningDataModule):
         use_target_area_ratio: bool = False,
         ood_area_ratio_ranges: Optional[list] = None,
         ood_area_ratio_weights: Optional[list] = None,
+        # Debug/log controls
+        dbg_max_count: int = 0,
+        log_reality_check: bool = False,
+        paste_trace_enabled: bool = False,
+        print_write0_debug: bool = False,
     ) -> None:
         """
         Args:
@@ -146,6 +151,10 @@ class CityscapesSemanticWithOE(LightningDataModule):
                     use_target_area_ratio=use_target_area_ratio,
                     ood_area_ratio_ranges=ood_area_ratio_ranges,
                     ood_area_ratio_weights=ood_area_ratio_weights,
+                    dbg_max_count=dbg_max_count,
+                    log_reality_check=log_reality_check,
+                    paste_trace_enabled=paste_trace_enabled,
+                    print_write0_debug=print_write0_debug,
                 )
                 print(f"Outlier Exposure enabled with {len(coco_dataset)} COCO objects")
             except Exception as e:

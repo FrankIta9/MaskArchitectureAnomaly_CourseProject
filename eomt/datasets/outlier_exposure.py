@@ -89,6 +89,11 @@ class OutlierExposureTransform(nn.Module):
         use_target_area_ratio: bool = False,
         ood_area_ratio_ranges: Optional[list[list[float]]] = None,
         ood_area_ratio_weights: Optional[list[float]] = None,
+        # Debug/log controls (keep training fast by default)
+        dbg_max_count: int = 0,
+        log_reality_check: bool = False,
+        paste_trace_enabled: bool = False,
+        print_write0_debug: bool = False,
     ):
         """
         Args:
@@ -180,11 +185,15 @@ class OutlierExposureTransform(nn.Module):
         self.drivable_placement_count = 0
         self.random_placement_count = 0
     
-        # FIX 4: Debug counter for logging (first 2 batches only, ~4-6 samples)
+        # Debug counters/logging (disabled by default)
         self._dbg_count = 0
-        self._dbg_max_count = 6  # Limit to first ~2 batches (batch_size=2-3)
-        self._resample_warn_logged = False  # Disabled: resample is silent (no logging)
-        
+        self._dbg_max_count = int(dbg_max_count)
+        self._resample_warn_logged = False
+
+        self._log_reality_check = bool(log_reality_check)
+        self._paste_trace_enabled = bool(paste_trace_enabled)
+        self._print_write0_debug = bool(print_write0_debug)
+
         # Paste reality check counters (per sample, resettati in forward)
         self._attempted_ood = 0
         self._pasted_ood = 0
@@ -194,8 +203,6 @@ class OutlierExposureTransform(nn.Module):
         self._skipped_shape_mismatch = 0
         self._skipped_alpha0 = 0
         self._skipped_too_small = 0
-        self._log_reality_check = True  # Always enabled, logging controlled in lightning_module
-        self._paste_trace_enabled = False  # Enabled for first 50 batches
     
     def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor, str]:
         """
@@ -502,20 +509,25 @@ class OutlierExposureTransform(nn.Module):
                     self._skipped_write0 += 1
                 skip_reason = "write0"
                 
-                # Diagnosi dettagliata: chi sta azzerando la maschera?
-                reg_sum = int(region_mask.sum().item()) if region_mask is not None else None
-                print(f"❌ paste_mask empty - obj_sum={obj_mask_sum}, reg_sum={reg_sum}, "
-                      f"x={x}, y={y}, w={new_w}, h={new_h}, "
-                      f"x_end={x_end}, y_end={y_end}, "
-                      f"img_shape={img.shape[-2:]}, target_shape={target.get('valid_mask', torch.tensor([])).shape if 'valid_mask' in target else 'N/A'}")
-                
-                # Interpretazione immediata
-                if obj_mask_sum == 0:
-                    print("   🔍 DIAGNOSI: obj_mask_sum == 0 → la mask dell'oggetto è vuota (conversione o resize)")
-                elif obj_mask_sum > 0 and reg_sum == 0:
-                    print("   🔍 DIAGNOSI: obj_mask_sum > 0 ma reg_sum == 0 → region_mask è sbagliata o troppo restrittiva")
-                elif obj_mask_sum > 0 and reg_sum is not None and reg_sum > 0:
-                    print("   🔍 DIAGNOSI: obj_mask_sum > 0 e reg_sum > 0 ma write_sum == 0 → problema nel posizionamento/overlap/vincoli finali")
+                # Diagnosi dettagliata (opt-in)
+                if self._print_write0_debug:
+                    reg_sum = int(region_mask.sum().item()) if region_mask is not None else None
+                    if not hasattr(self, "_dbg_write0_prints"):
+                        self._dbg_write0_prints = 0
+                    if self._dbg_write0_prints < 20:
+                        print(
+                            f"❌ paste_mask empty - obj_sum={obj_mask_sum}, reg_sum={reg_sum}, "
+                            f"x={x}, y={y}, w={new_w}, h={new_h}, "
+                            f"x_end={x_end}, y_end={y_end}, "
+                            f"img_shape={img.shape[-2:]}, target_shape={target.get('valid_mask', torch.tensor([])).shape if 'valid_mask' in target else 'N/A'}"
+                        )
+                        if obj_mask_sum == 0:
+                            print("   🔍 DIAGNOSI: obj_mask_sum == 0 → la mask dell'oggetto è vuota (conversione o resize)")
+                        elif obj_mask_sum > 0 and reg_sum == 0:
+                            print("   🔍 DIAGNOSI: obj_mask_sum > 0 ma reg_sum == 0 → region_mask è sbagliata o troppo restrittiva")
+                        elif obj_mask_sum > 0 and reg_sum is not None and reg_sum > 0:
+                            print("   🔍 DIAGNOSI: obj_mask_sum > 0 e reg_sum > 0 ma write_sum == 0 → problema nel posizionamento/overlap/vincoli finali")
+                        self._dbg_write0_prints += 1
                 
                 # Paste trace: log anche per skip
                 if self._paste_trace_enabled:
@@ -658,11 +670,7 @@ class OutlierExposureTransform(nn.Module):
         self._skipped_shape_mismatch = 0
         self._skipped_alpha0 = 0
         
-        # Enable paste trace for first 50 batches
-        if not hasattr(self, '_paste_trace_batch_count'):
-            self._paste_trace_batch_count = 0
-        self._paste_trace_enabled = (self._paste_trace_batch_count < 50)
-        self._paste_trace_batch_count += 1
+        # paste_trace is controlled by init flag (do not auto-enable)
         
         # Initialize ood_mask: 0 = ID, 1 = OOD, 255 = ignore (opzionale)
         ood_mask = torch.zeros((h, w), dtype=torch.uint8, device=img.device)
@@ -903,21 +911,22 @@ class OutlierExposureTransform(nn.Module):
         # Add ood_mask to target
         target["ood_mask"] = ood_mask
         
-        # Rate-limited debug hook: after paste (avoid spamming)
-        s = int(target["ood_mask"].sum().item())
-        if s == 0:
-            if not hasattr(self, "_dbg_zero_ood"):
-                self._dbg_zero_ood = 0
-            if self._dbg_zero_ood < 10:
-                print("❌ OOD_MASK still zero right after paste!")
-                print(f"   paste_mask any: {bool(cumulative_paste_mask.any().item())}")
-                print(f"   paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
-                print(f"   ood_mask dtype: {target['ood_mask'].dtype}")
-                print(f"   ood_mask unique: {torch.unique(target['ood_mask']).tolist()[:10]}")
-                print(f"   ood_mask shape: {target['ood_mask'].shape}")
-                print(f"   cumulative_paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
-                print(f"   cumulative_paste_mask dtype: {cumulative_paste_mask.dtype}")
-                self._dbg_zero_ood += 1
+        # Optional debug hook: after paste (disabled by default)
+        if self._print_write0_debug:
+            s = int(target["ood_mask"].sum().item())
+            if s == 0:
+                if not hasattr(self, "_dbg_zero_ood"):
+                    self._dbg_zero_ood = 0
+                if self._dbg_zero_ood < 5:
+                    print("❌ OOD_MASK still zero right after paste!")
+                    print(f"   paste_mask any: {bool(cumulative_paste_mask.any().item())}")
+                    print(f"   paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
+                    print(f"   ood_mask dtype: {target['ood_mask'].dtype}")
+                    print(f"   ood_mask unique: {torch.unique(target['ood_mask']).tolist()[:10]}")
+                    print(f"   ood_mask shape: {target['ood_mask'].shape}")
+                    print(f"   cumulative_paste_mask sum: {int(cumulative_paste_mask.sum().item())}")
+                    print(f"   cumulative_paste_mask dtype: {cumulative_paste_mask.dtype}")
+                    self._dbg_zero_ood += 1
         
         # Store paste reality check counters in target for logging in lightning_module
         if self._log_reality_check:

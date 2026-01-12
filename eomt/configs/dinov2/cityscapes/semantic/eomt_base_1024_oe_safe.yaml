@@ -166,5 +166,11 @@ data:
     use_drivable_regions: false
     drivable_class_ids: [0, 1]
 
+    # Debug/log controls (keep training fast)
+    dbg_max_count: 0
+    log_reality_check: false
+    paste_trace_enabled: false
+    print_write0_debug: false
+
     # Blending
     blend_alpha: 1.0             # 1.0 = dry paste (più stabile)
