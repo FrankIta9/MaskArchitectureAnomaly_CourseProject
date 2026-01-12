@@ -25,7 +25,8 @@ trainer:
   max_epochs: 30
   
   # Batch size e precision (adatta alle tue risorse)
-  accumulate_grad_batches: 1
+  # Config "safe" per batch_size 2: accumulate_grad_batches 2 per stabilità simile a batch 4
+  accumulate_grad_batches: 2
   precision: "16-mixed"  # AMP per velocità
   
   # Checkpoint salvati (adatta il path)
