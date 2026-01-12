@@ -26,7 +26,7 @@ from PIL import Image
 import yaml
 import importlib
 import argparse
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from collections import defaultdict
 
 # ============================================================================
