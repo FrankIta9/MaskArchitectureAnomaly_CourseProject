@@ -525,13 +525,13 @@ class OutlierExposureTransform(nn.Module):
                             position2 = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
                             if position2 is not None:
                                 x, y = position2
-                else:
+                            else:
                                 # Fallback safe: random solo in valid+bottom
                                 y_min = int(0.7 * h)
                                 x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
                                 if x is None:
                                     continue  # Skip this object
-            else:
+                        else:
                             # Verifica che l'oggetto ci stia ancora nella posizione scelta
                             if x + obj_w_scaled > w or y + obj_h_scaled > h:
                                 # Se non ci sta, clamp x,y
