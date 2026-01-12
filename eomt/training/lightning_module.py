@@ -28,6 +28,7 @@ import wandb
 from PIL import Image
 import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
+import numpy as np
 import io
 import matplotlib.pyplot as plt
 import numpy as np
