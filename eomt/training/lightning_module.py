@@ -8,6 +8,7 @@
 # All used under the Apache 2.0 License.
 # ---------------------------------------------------------------
 
+import os
 import math
 import re
 from typing import Optional, cast
@@ -470,8 +471,8 @@ class LightningModule(lightning.LightningModule):
         ood_ratios_per_sample = []  # Per calcolare mean/p50
         y_norm_centers = []  # Per calcolare y_norm_center medio
         
-        # NEW: Detailed logging for first 100 batches (consistency core + paste reality check + OOD size stats)
-        if batch_idx < 100:
+        # NEW: Detailed logging for first 100 batches (opt-in)
+        if os.environ.get("EOMT_DEBUG_TRAINING", "0") == "1" and batch_idx < 100:
             for sample_idx, target in enumerate(targets):
                 if sample_idx >= 2:  # Only log for sample 0 and 1
                     break
@@ -553,11 +554,17 @@ class LightningModule(lightning.LightningModule):
                             ignore_ratio_patch = paste_debug.get("ignore_ratio_patch", None)
                             skip_reason = paste_debug.get("skip_reason", None)
                             
+                            write_mask_ratio_str = (
+                                f"{float(write_mask_ratio):.4f}" if write_mask_ratio is not None else "N/A"
+                            )
+                            ignore_ratio_patch_str = (
+                                f"{float(ignore_ratio_patch):.4f}" if ignore_ratio_patch is not None else "N/A"
+                            )
                             logging.info(
                                 f"📊 Paste Debug - Batch {batch_idx}, Sample {sample_idx}, Obj {obj_idx}: "
-                                f"write_mask_ratio={write_mask_ratio:.4f if write_mask_ratio is not None else 'N/A'}, "
-                                f"ignore_ratio_patch={ignore_ratio_patch:.4f if ignore_ratio_patch is not None else 'N/A'}, "
-                                f"skip_reason={skip_reason if skip_reason else 'None'}"
+                                f"write_mask_ratio={write_mask_ratio_str}, "
+                                f"ignore_ratio_patch={ignore_ratio_patch_str}, "
+                                f"skip_reason={skip_reason or 'None'}"
                             )
         
         if targets and "ood_mask" in targets[0]:
@@ -640,8 +647,8 @@ class LightningModule(lightning.LightningModule):
                 y_norm_center_mean = float(np.mean(y_norm_centers))
                 self.log("dbg/oe/y_norm_center_mean", y_norm_center_mean, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
         
-        # 3. OOD size stats (primi 100 batch): p50/p90 di ood_ratio su batch con ood_pixels>0
-        if batch_idx < 100 and len(ood_ratios_per_sample) > 0:
+        # 3. OOD size stats (opt-in)
+        if os.environ.get("EOMT_DEBUG_TRAINING", "0") == "1" and batch_idx < 100 and len(ood_ratios_per_sample) > 0:
             ood_ratios_tensor = torch.tensor(ood_ratios_per_sample)
             ood_ratio_p50 = torch_percentile(ood_ratios_tensor, 50)
             ood_ratio_p90 = torch_percentile(ood_ratios_tensor, 90)
@@ -671,8 +678,8 @@ class LightningModule(lightning.LightningModule):
         if batch_n_objects_pasted > 0:
             self.log("dbg/oe/n_objects_pasted", float(batch_n_objects_pasted), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
         
-        # P0 - Problema #2: Sanity check normalizzazione (solo primi 3 batch)
-        if batch_idx < 3:
+        # P0 - Problema #2: Sanity check normalizzazione (opt-in)
+        if os.environ.get("EOMT_DEBUG_TRAINING", "0") == "1" and batch_idx < 3:
             # Forward pass per ottenere x dopo /255.0 (prima della normalizzazione in EoMT)
             x_pre = imgs.float() / 255.0
             
@@ -705,9 +712,9 @@ class LightningModule(lightning.LightningModule):
                         f"  Canale {c}: mean={channel_mean:.4f}, std={channel_std:.4f}"
                     )
         
-        # Task 1: Print ood_mask for first 3 batches + overlay check
+        # Task 1: Print ood_mask for first 3 batches + overlay check (opt-in)
         # P0 Fix: Sanity check per labels/is_crowd (tipo e shape)
-        if self._ood_mask_print_count < 3:
+        if os.environ.get("EOMT_DEBUG_TRAINING", "0") == "1" and self._ood_mask_print_count < 3:
             # Check if any target has ood_mask
             for i, target in enumerate(targets):
                 # P0 Fix: Sanity check per labels/is_crowd

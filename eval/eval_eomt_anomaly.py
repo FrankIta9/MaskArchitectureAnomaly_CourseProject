@@ -117,6 +117,26 @@ def load_eomt_model(ckpt_path: str, device: torch.device) -> EoMT:
     model.eval()
     return model
 
+def _collect_input_files(inputs: list[str]) -> list[str]:
+    """Expand input arguments into a sorted list of image files.
+
+    Supports glob patterns, directories, and multiple --input entries.
+    """
+    exts = (".png", ".jpg", ".jpeg", ".webp")
+    files: list[str] = []
+    for entry in inputs:
+        entry = os.path.expanduser(str(entry))
+        if os.path.isdir(entry):
+            for ext in exts:
+                files.extend(glob.glob(os.path.join(entry, f"*{ext}")))
+        else:
+            files.extend(glob.glob(entry))
+
+    # Filter by extensions (globs can match non-images)
+    files = [f for f in files if os.path.isfile(f) and os.path.splitext(f)[1].lower() in exts]
+    return sorted(set(files))
+
+
 def compute_anomaly_map(logits: torch.Tensor, method: str, temperature: float = 1.0) -> torch.Tensor:
     """
     Genera una mappa di anomalia pixel-wise a partire dai logits semantici.
@@ -178,7 +198,11 @@ def main():
     if not os.path.exists(args.output):
         open(args.output, "w").close()
     
-    ckpt_full_path = os.path.join(args.loadDir, args.loadWeights)
+    ckpt_full_path = (
+        args.loadWeights
+        if os.path.isabs(args.loadWeights) or os.path.exists(args.loadWeights)
+        else os.path.join(args.loadDir, args.loadWeights)
+    )
     print(f"Caricamento pesi da: {ckpt_full_path}")
 
     # Caricamento Modello
@@ -193,11 +217,12 @@ def main():
     anomaly_score_list = []
     ood_gts_list = []
     
-    file_list = glob.glob(os.path.expanduser(str(args.input[0])))
+    file_list = _collect_input_files(args.input)
     print(f"Trovate {len(file_list)} immagini da elaborare.")
 
     if len(file_list) == 0:
         print("🔴 ERRORE: Nessuna immagine trovata! Controlla il path.")
+        print(f"   input args: {args.input}")
         return
 
     # -------------------------------------------------------------------------
