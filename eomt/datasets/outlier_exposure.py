@@ -1053,9 +1053,9 @@ class OutlierExposureTransform(nn.Module):
             y_low_relaxed = int(0.50 * h)
             for pos in all_valid_positions:
                 y, x = pos.tolist()
-                if y < y_low_relaxed:
-                    continue
-                if y <= max_y and x <= max_x:
+            if y < y_low_relaxed:
+                continue
+            if y <= max_y and x <= max_x:
                 valid_positions.append([y, x])
         
         if len(valid_positions) == 0:
