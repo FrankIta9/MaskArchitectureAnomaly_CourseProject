@@ -14,6 +14,7 @@ import lightning
 from lightning.fabric.utilities import rank_zero_info
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torchmetrics.classification import MulticlassJaccardIndex
 from torchmetrics.detection import PanopticQuality, MeanAveragePrecision
@@ -489,12 +490,30 @@ class LightningModule(lightning.LightningModule):
                             energy_id = energy_valid[ood_mask_valid == 0]
                             energy_ood = energy_valid[ood_mask_valid == 1]
                             
+                            # Log pixel counts
+                            n_id_pixels = energy_id.numel()
+                            n_ood_pixels = energy_ood.numel()
+                            self.log("dbg/n_id_pixels", float(n_id_pixels), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                            self.log("dbg/n_ood_pixels", float(n_ood_pixels), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                            
                             # Log mean energies
                             if energy_id.numel() > 0:
                                 energy_id_mean = energy_id.mean().item()
                                 energy_id_std = energy_id.std().item()
                                 self.log("dbg/energy_id_mean", energy_id_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                 self.log("dbg/energy_id_std", energy_id_std, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                
+                                # Log percentili ogni 200 step
+                                current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
+                                if current_step % 200 == 0:
+                                    energy_id_np = energy_id.detach().cpu().numpy()
+                                    if len(energy_id_np) > 0:
+                                        p10_id = float(np.percentile(energy_id_np, 10))
+                                        p50_id = float(np.percentile(energy_id_np, 50))
+                                        p90_id = float(np.percentile(energy_id_np, 90))
+                                        self.log("dbg/energy_id_p10", p10_id, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+                                        self.log("dbg/energy_id_p50", p50_id, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+                                        self.log("dbg/energy_id_p90", p90_id, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
                                 
                                 # Task 4: Accumulate energy values for margin calculation
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_id_buffer)
@@ -513,6 +532,18 @@ class LightningModule(lightning.LightningModule):
                                 self.log("dbg/energy_ood_mean", energy_ood_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                 self.log("dbg/energy_ood_std", energy_ood_std, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
                                 
+                                # Log percentili ogni 200 step
+                                current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else 0
+                                if current_step % 200 == 0:
+                                    energy_ood_np = energy_ood.detach().cpu().numpy()
+                                    if len(energy_ood_np) > 0:
+                                        p10_ood = float(np.percentile(energy_ood_np, 10))
+                                        p50_ood = float(np.percentile(energy_ood_np, 50))
+                                        p90_ood = float(np.percentile(energy_ood_np, 90))
+                                        self.log("dbg/energy_ood_p10", p10_ood, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+                                        self.log("dbg/energy_ood_p50", p50_ood, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+                                        self.log("dbg/energy_ood_p90", p90_ood, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=False)
+                                
                                 # Task 4: Accumulate energy values for margin calculation
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_ood_buffer)
                                 if not self._energy_margins_computed and current_step < self._energy_margin_calculation_steps:
@@ -528,6 +559,45 @@ class LightningModule(lightning.LightningModule):
                             if energy_id.numel() > 0 and energy_ood.numel() > 0:
                                 energy_sep = energy_ood.mean() - energy_id.mean()
                                 self.log("dbg/energy_sep", energy_sep, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                
+                                # Log energy loss components (loss_id, loss_ood, loss_total)
+                                # Use same formula as EnergyOODLoss: L_id = ReLU(E_id - m_in), L_ood = ReLU(m_out - E_ood)
+                                if hasattr(self, 'criterion') and hasattr(self.criterion, 'energy_ood_loss'):
+                                    try:
+                                        base_loss = self.criterion.energy_ood_loss.base_loss if hasattr(self.criterion.energy_ood_loss, 'base_loss') else self.criterion.energy_ood_loss
+                                        m_in = base_loss.m_in
+                                        m_out = base_loss.m_out
+                                        
+                                        # Calculate loss components
+                                        loss_id = F.relu(energy_id - m_in).mean()
+                                        loss_ood = F.relu(m_out - energy_ood).mean()
+                                        loss_total = loss_id + loss_ood
+                                        
+                                        # Apply weight if available
+                                        if hasattr(base_loss, 'weight'):
+                                            loss_id_weighted = loss_id * base_loss.weight
+                                            loss_ood_weighted = loss_ood * base_loss.weight
+                                            loss_total_weighted = loss_total * base_loss.weight
+                                        else:
+                                            loss_id_weighted = loss_id
+                                            loss_ood_weighted = loss_ood
+                                            loss_total_weighted = loss_total
+                                        
+                                        # Apply warmup weight if available
+                                        if hasattr(self.criterion.energy_ood_loss, 'get_current_weight'):
+                                            warmup_weight = self.criterion.energy_ood_loss.get_current_weight()
+                                            if hasattr(self.criterion.energy_ood_loss, 'max_weight'):
+                                                scale_factor = warmup_weight / self.criterion.energy_ood_loss.max_weight
+                                                loss_id_weighted = loss_id_weighted * scale_factor
+                                                loss_ood_weighted = loss_ood_weighted * scale_factor
+                                                loss_total_weighted = loss_total_weighted * scale_factor
+                                        
+                                        self.log("loss/energy_id", loss_id_weighted.item(), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                        self.log("loss/energy_ood", loss_ood_weighted.item(), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                        self.log("loss/energy_total", loss_total_weighted.item(), on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=False)
+                                    except Exception as e:
+                                        # If calculation fails, skip logging but don't crash
+                                        pass
                             
                             # Task 4: Compute margins after collecting enough statistics
                             current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_id_buffer)
