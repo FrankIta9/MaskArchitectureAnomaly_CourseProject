@@ -580,7 +580,7 @@ class OutlierExposureTransform(nn.Module):
                 
                 # Get random outlier object (with category_name)
                 obj_img, obj_mask, category_name = self._get_random_outlier_object()
-                obj_h_orig, obj_w_orig = obj_img.shape[-2:]
+            obj_h_orig, obj_w_orig = obj_img.shape[-2:]
                 
                 # For ID paste: only use mappable categories
                 # For OOD paste: only use non-mappable categories
@@ -650,7 +650,7 @@ class OutlierExposureTransform(nn.Module):
                             position2 = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
                             if position2 is not None:
                                 x, y = position2
-                            else:
+                else:
                                 # Fallback safe: random solo in valid+bottom
                                 y_min = int(0.7 * h)
                                 x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
@@ -658,7 +658,7 @@ class OutlierExposureTransform(nn.Module):
                                     if self._log_reality_check:
                                         self._skipped_no_position += 1
                                     continue  # Skip this object
-                        else:
+            else:
                             # Verifica che l'oggetto ci stia ancora nella posizione scelta
                             if x + obj_w_scaled > w or y + obj_h_scaled > h:
                                 # Se non ci sta, clamp x,y
@@ -1053,9 +1053,9 @@ class OutlierExposureTransform(nn.Module):
             y_low_relaxed = int(0.50 * h)
             for pos in all_valid_positions:
                 y, x = pos.tolist()
-            if y < y_low_relaxed:
-                continue
-            if y <= max_y and x <= max_x:
+                if y < y_low_relaxed:
+                    continue
+                if y <= max_y and x <= max_x:
                 valid_positions.append([y, x])
         
         if len(valid_positions) == 0:
