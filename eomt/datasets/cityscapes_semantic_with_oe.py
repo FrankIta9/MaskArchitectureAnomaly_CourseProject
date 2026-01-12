@@ -35,8 +35,9 @@ class CityscapesSemanticWithOE(LightningDataModule):
         check_empty_targets=True,
         # Outlier Exposure parameters
         coco_path: Optional[str] = None,
-        coco_split: str = "val2017",
+        coco_split: str = "train2017",
         use_coco_zip: bool = False,
+        coco_allowed_category_ids: Optional[list[int]] = None,
         paste_probability: float = 0.5,
         min_objects: int = 1,
         max_objects: int = 3,
@@ -102,6 +103,7 @@ class CityscapesSemanticWithOE(LightningDataModule):
                     split=coco_split,
                     min_area=coco_min_area,
                     use_zip=use_coco_zip,
+                    allowed_category_ids=coco_allowed_category_ids,
                 )
                 outlier_exposure_transform = OutlierExposureTransform(
                     outlier_dataset=coco_dataset,

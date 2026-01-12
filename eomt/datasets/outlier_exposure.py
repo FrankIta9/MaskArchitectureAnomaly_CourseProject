@@ -24,6 +24,49 @@ except ImportError:
     COCO_AVAILABLE = False
     print("Warning: pycocotools not available. Install with: pip install pycocotools")
 
+# COCO category whitelist: indoor + sport + appliances (exclude person/vehicles)
+# Indoor: furniture, electronics, household items
+# Sport: sports equipment
+# Appliances: kitchen and household appliances
+COCO_WHITELIST_INDOOR_SPORT_APPLIANCES = [
+    # Indoor furniture and items
+    62,  # chair
+    63,  # couch
+    65,  # bed
+    67,  # dining table
+    70,  # toilet
+    72,  # tv
+    73,  # laptop
+    74,  # mouse
+    75,  # remote
+    76,  # keyboard
+    77,  # cell phone
+    81,  # sink
+    84,  # book
+    85,  # clock
+    86,  # vase
+    87,  # scissors
+    88,  # teddy bear
+    90,  # toothbrush
+    # Sport equipment
+    37,  # sports ball
+    38,  # kite
+    39,  # baseball bat
+    40,  # baseball glove
+    41,  # skateboard
+    42,  # surfboard
+    43,  # tennis racket
+    44,  # frisbee
+    45,  # skis
+    46,  # snowboard
+    # Appliances
+    78,  # microwave
+    79,  # oven
+    80,  # toaster
+    82,  # refrigerator
+    89,  # hair drier
+]
+
 
 class OutlierExposureTransform(nn.Module):
     """
@@ -729,10 +772,11 @@ class COCOOutlierDataset:
     def __init__(
         self,
         coco_path: str,
-        split: str = "val2017",
+        split: str = "train2017",
         min_area: int = 1000,
         max_area: Optional[int] = None,
         use_zip: bool = False,
+        allowed_category_ids: Optional[list[int]] = None,
     ):
         """
         Args:
@@ -741,6 +785,7 @@ class COCOOutlierDataset:
             min_area: Minimum object area in pixels (filters small objects)
             max_area: Maximum object area in pixels (filters very large objects)
             use_zip: If True, load from zip files instead of directories
+            allowed_category_ids: Whitelist of COCO category IDs to include (None = all categories)
         """
         if not COCO_AVAILABLE:
             raise ImportError(
@@ -753,6 +798,7 @@ class COCOOutlierDataset:
         self.min_area = min_area
         self.max_area = max_area
         self.use_zip = use_zip
+        self.allowed_category_ids = set(allowed_category_ids) if allowed_category_ids is not None else None
         
         # Load COCO annotations
         if use_zip:
@@ -837,6 +883,7 @@ class COCOOutlierDataset:
                 # Filter criteria
                 area = ann['area']
                 is_crowd = ann.get('iscrowd', 0)
+                category_id = ann['category_id']
                 
                 if is_crowd:
                     continue
@@ -845,6 +892,10 @@ class COCOOutlierDataset:
                     continue
                 
                 if self.max_area is not None and area > self.max_area:
+                    continue
+                
+                # Whitelist filter: only allow specified categories
+                if self.allowed_category_ids is not None and category_id not in self.allowed_category_ids:
                     continue
                 
                 # Store object info
