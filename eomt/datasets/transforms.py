@@ -136,6 +136,10 @@ class Transforms(nn.Module):
 
         img = F.pad(img, padding)
         target["masks"] = F.pad(target["masks"], padding)
+        
+        # Pad anche semseg se presente (pixel-wise, usa NEAREST)
+        if "semseg" in target:
+            target["semseg"] = F.pad(target["semseg"], padding)
 
         return img, target
 
@@ -159,7 +163,7 @@ class Transforms(nn.Module):
         """
         filtered = {}
         # Fields to exclude from filtering (pixel-wise, not arrays)
-        exclude_from_filter = {"ood_mask"}  # ood_mask is [H, W], not [N, H, W]
+        exclude_from_filter = {"ood_mask", "semseg"}  # ood_mask and semseg are [H, W], not [N, H, W]
         
         # 🔧 P0 Fix: Normalizza labels/is_crowd a Tensor prima di filtrare
         # Questo evita crash quando diventano liste durante le trasformazioni

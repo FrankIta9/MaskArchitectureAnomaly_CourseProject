@@ -134,17 +134,33 @@ class CityscapesSemanticWithOE(LightningDataModule):
     @staticmethod
     def target_parser(target, **kwargs):
         masks, labels = [], []
-
-        for label_id in target[0].unique():
+        
+        # Extract semseg: target è tv_tensors.Mask con shape [H, W] o [1, H, W]
+        # Gestisci entrambi i casi
+        if target.dim() == 3:
+            semseg_raw = target[0]  # [H, W]
+        else:
+            semseg_raw = target  # [H, W]
+        
+        # Crea semseg mappando label_id -> train_id
+        # Ignore pixels (255) rimangono 255
+        IGNORE = 255
+        semseg = torch.full_like(semseg_raw, IGNORE, dtype=torch.long)
+        
+        for label_id in semseg_raw.unique():
             cls = next((cls for cls in Cityscapes.classes if cls.id == label_id), None)
 
             if cls is None or cls.ignore_in_eval:
                 continue
 
-            masks.append(target[0] == label_id)
+            mask = (semseg_raw == label_id)
+            masks.append(mask)
             labels.append(cls.train_id)
+            
+            # Mappa label_id -> train_id in semseg
+            semseg[mask] = cls.train_id
 
-        return masks, labels, [False for _ in range(len(masks))]
+        return masks, labels, [False for _ in range(len(masks))], semseg
 
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
         cityscapes_dataset_kwargs = {

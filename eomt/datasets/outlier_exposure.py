@@ -358,15 +358,15 @@ class OutlierExposureTransform(nn.Module):
         # Problema: pm è alla risoluzione finale (es. 1024x1024) ma target["masks"]
         # può essere ancora alla risoluzione originale (es. 1552x2079), causando mismatch.
         # OE non deve toccare le GT masks - il conflitto OOD vs GT può essere gestito
-        # nella loss settando i pixel OOD come ignore (255) o usando ood_mask.
-        #
-        # ❌ RIMOSSO (causava crash per mismatch di risoluzione):
-        # target["masks"][:, pm] = False
-        # e filtraggio maschere vuote
+        # nella loss settando i pixel OOD come ignore (255) in semseg.
         
-        # Optional: Set 255 for ignore pixels (where target is ignore)
-        # Note: In Cityscapes, ignore pixels are filtered in target_parser, so this is optional
-        # If needed, we could check target["masks"] for ignore regions, but typically not needed
+        # Set IGNORE (255) per pixel OOD in semseg
+        IGNORE = 255
+        if "semseg" in target:
+            target["semseg"] = target["semseg"].clone()
+            target["semseg"][ood_mask == 1] = IGNORE
+        else:
+            raise RuntimeError("target['semseg'] missing: create it in target_parser.")
         
         # Add ood_mask to target
         target["ood_mask"] = ood_mask

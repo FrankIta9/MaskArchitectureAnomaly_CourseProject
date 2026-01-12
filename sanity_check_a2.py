@@ -130,13 +130,14 @@ def main():
             
             # P0 - Problema #1: Check overlap_ratio (OOD vs GT)
             overlap_ratio = None
-            if "masks" in target and target["masks"].numel() > 0:
-                # gt_union = OR di tutte le target["masks"] (shape [H,W])
-                gt_union = target["masks"].any(dim=0)  # [H, W] bool
+            IGNORE = 255
+            
+            # Usa semseg se disponibile (più corretto), altrimenti fallback a masks
+            if "semseg" in target:
+                # gt_union = pixel validi (non ignore) in semseg
+                gt_union = (target["semseg"] != IGNORE)  # [H, W] bool
                 
                 # Fix: Forza gt_union alla stessa shape di ood_mask
-                # ood_mask: [H, W] (uint8)
-                # gt_union: [H2, W2] (bool or uint8)
                 H, W = ood_mask.shape[-2], ood_mask.shape[-1]
                 
                 if gt_union.shape[-2:] != (H, W):
@@ -149,9 +150,26 @@ def main():
                 if batch_idx == 0 and sample_idx == 0:
                     print(f"🔍 Debug shape (batch 0, sample 0):")
                     print(f"  ood_mask: {tuple(ood_mask.shape)}, dtype={ood_mask.dtype}")
-                    print(f"  gt_union: {tuple(gt_union.shape)}, dtype={gt_union.dtype}")
+                    print(f"  semseg: {tuple(target['semseg'].shape)}, dtype={target['semseg'].dtype}")
+                    print(f"  gt_union (semseg != IGNORE): {tuple(gt_union.shape)}, dtype={gt_union.dtype}")
+                    print(f"  semseg unique values: {torch.unique(target['semseg']).tolist()}")
                 
-                # ora non crasha
+                # Calcola overlap: pixel OOD che NON sono ignore in semseg
+                # Se semseg è gestito correttamente, i pixel OOD dovrebbero essere già IGNORE
+                # quindi overlap dovrebbe essere 0 (o molto basso)
+                overlap = (ood_mask == 1) & gt_union
+            elif "masks" in target and target["masks"].numel() > 0:
+                # Fallback: usa masks (metodo vecchio)
+                gt_union = target["masks"].any(dim=0)  # [H, W] bool
+                
+                # Fix: Forza gt_union alla stessa shape di ood_mask
+                H, W = ood_mask.shape[-2], ood_mask.shape[-1]
+                
+                if gt_union.shape[-2:] != (H, W):
+                    gt_union_rs = gt_union.to(torch.float32)[None, None, ...]
+                    gt_union_rs = F.interpolate(gt_union_rs, size=(H, W), mode="nearest")
+                    gt_union = gt_union_rs[0, 0].to(torch.bool)
+                
                 overlap = (ood_mask == 1) & gt_union
                 # overlap_ratio = overlap.sum / (ood_mask==1).sum
                 ood_pixels_count = (ood_mask == 1).sum().item()

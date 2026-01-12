@@ -1413,17 +1413,26 @@ class LightningModule(lightning.LightningModule):
     ):
         per_pixel_targets = []
         for target in targets:
-            per_pixel_target = torch.full(
-                target["masks"].shape[-2:],
-                ignore_idx,
-                dtype=target["labels"].dtype,
-                device=target["labels"].device,
-            )
+            # Usa semseg se disponibile (più efficiente e corretto)
+            if "semseg" in target:
+                # semseg è già per-pixel con ignore_index gestito
+                per_pixel_target = target["semseg"].clone()
+                # Assicurati che ignore_idx sia 255 (o quello che è stato usato)
+                # Se semseg ha già ignore gestito, usa direttamente
+                per_pixel_targets.append(per_pixel_target)
+            else:
+                # Fallback: costruisci da masks e labels (metodo vecchio)
+                per_pixel_target = torch.full(
+                    target["masks"].shape[-2:],
+                    ignore_idx,
+                    dtype=target["labels"].dtype,
+                    device=target["labels"].device,
+                )
 
-            for i, mask in enumerate(target["masks"]):
-                per_pixel_target[mask] = target["labels"][i]
+                for i, mask in enumerate(target["masks"]):
+                    per_pixel_target[mask] = target["labels"][i]
 
-            per_pixel_targets.append(per_pixel_target)
+                per_pixel_targets.append(per_pixel_target)
 
         return per_pixel_targets
 

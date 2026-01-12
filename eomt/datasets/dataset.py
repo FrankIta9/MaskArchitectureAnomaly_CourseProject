@@ -196,7 +196,7 @@ class Dataset(torch.utils.data.Dataset):
                     Image.open(target_instance), dtype=torch.long
                 )
 
-        masks, labels, is_crowd = self.target_parser(
+        parser_result = self.target_parser(
             target=target,
             target_instance=target_instance,
             stuff_classes=self.stuff_classes,
@@ -206,12 +206,23 @@ class Dataset(torch.utils.data.Dataset):
             width=img.shape[-1],
             height=img.shape[-2],
         )
+        
+        # Gestisci sia il caso vecchio (3 valori) che nuovo (4 valori con semseg)
+        if len(parser_result) == 4:
+            masks, labels, is_crowd, semseg = parser_result
+        else:
+            masks, labels, is_crowd = parser_result
+            semseg = None
 
         target = {
             "masks": tv_tensors.Mask(torch.stack(masks)),
             "labels": torch.tensor(labels),
             "is_crowd": torch.tensor(is_crowd),
         }
+        
+        # Aggiungi semseg se presente
+        if semseg is not None:
+            target["semseg"] = tv_tensors.Mask(semseg)
 
         if self.transforms is not None:
             img, target = self.transforms(img, target)
