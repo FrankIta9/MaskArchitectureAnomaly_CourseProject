@@ -182,7 +182,7 @@ class MaskClassificationSemantic(LightningModule):
             self.log("dbg/energy/weight", current_weight, on_step=False, on_epoch=False, sync_dist=False)
             # Log flag per indicare se warmup_start_epoch è stato impostato automaticamente
             if hasattr(self, '_warmup_start_epoch_auto_set'):
-                self.log("dbg/energy/warmup_start_epoch_auto_set", float(self._warmup_start_epoch_auto_set), on_step=False, on_epoch=False, sync_dist=False)
+                self.log("dbg/energy/warmup_start_epoch_auto_set", float(self._warmup_start_epoch_auto_set), on_step=False, on_epoch=True, sync_dist=False)
             
             # Log margins (m_in, m_out)
             if hasattr(energy_loss, 'base_loss'):
