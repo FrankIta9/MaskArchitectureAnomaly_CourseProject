@@ -72,17 +72,18 @@ def main():
     data_module = getattr(importlib.import_module(data_module_name), class_name)
     data_module_kwargs = config["data"].get("init_args", {})
 
-    # Override path
+    # Override path e altri parametri
     data_module_kwargs["path"] = args.data_path
     if args.coco_path is not None and "coco_path" in data_module_kwargs:
         data_module_kwargs["coco_path"] = args.coco_path
+    
+    # Override batch_size e num_workers per sanity check
+    data_module_kwargs["batch_size"] = 1  # Piccolo per risparmiare memoria
+    data_module_kwargs["num_workers"] = 0  # 0 per debug (evita problemi multiprocessing)
 
-    # Crea dataloader (batch_size=1 per semplicità, num_workers=0 per debug)
+    # Crea dataloader
     print("🔍 Creating dataloader...")
     data = data_module(
-        path=args.data_path,
-        batch_size=1,  # Piccolo per risparmiare memoria
-        num_workers=0,  # 0 per debug (evita problemi multiprocessing)
         **data_module_kwargs
     ).setup()
 
