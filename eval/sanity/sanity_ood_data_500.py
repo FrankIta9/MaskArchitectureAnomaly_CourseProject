@@ -54,10 +54,11 @@ def compute_ood_placement_stats(ood_mask: torch.Tensor, h: int, w: int) -> Dict[
     """
     ood_pixels = (ood_mask == 1)
     if not ood_pixels.any():
+        # P0 Fix: Ritorna None invece di 0.0 per evitare che batch senza OOD ammazzino la mediana
         return {
-            "ood_in_bottom_ratio": 0.0,
-            "ood_in_top_ratio": 0.0,
-            "ood_in_middle_ratio": 0.0,
+            "ood_in_bottom_ratio": None,
+            "ood_in_top_ratio": None,
+            "ood_in_middle_ratio": None,
         }
     
     total_ood = ood_pixels.sum().item()
@@ -115,7 +116,8 @@ def compute_gt_occlusion_stats(
     ood_mask: torch.Tensor, 
     target_masks: torch.Tensor,
     h: int, 
-    w: int
+    w: int,
+    target: Optional[Dict] = None  # Aggiunto per accedere a semseg se disponibile
 ) -> Dict[str, float]:
     """
     S3: Calcola quanto GT viene coperto da OOD.
@@ -130,14 +132,53 @@ def compute_gt_occlusion_stats(
     """
     ood_pixels = (ood_mask == 1)
     
-    if not ood_pixels.any() or target_masks.numel() == 0:
+    if not ood_pixels.any():
         return {
             "gt_occlusion_ratio": 0.0,
             "gt_pixels_occluded": 0,
             "gt_pixels_total": 0,
         }
     
-    # Union di tutte le maschere GT
+    # P0 Fix: Prova a usare semseg se disponibile (più sensato per semantic segmentation)
+    if target is not None:
+        # Cerca semseg, segmentation, label, ecc.
+        semseg = None
+        for key in ["semseg", "segmentation", "label", "semantic"]:
+            if key in target and isinstance(target[key], torch.Tensor):
+                semseg = target[key]
+                break
+        
+        if semseg is not None:
+            # Usa semseg per-pixel (esclude ignore = 255)
+            gt_union = (semseg != 255)  # [H, W] - tutti i pixel validi
+            gt_pixels_total = gt_union.sum().item()
+            
+            if gt_pixels_total == 0:
+                return {
+                    "gt_occlusion_ratio": 0.0,
+                    "gt_pixels_occluded": 0,
+                    "gt_pixels_total": 0,
+                }
+            
+            # Pixel GT validi che sono coperti da OOD
+            gt_occluded = (gt_union & ood_pixels).sum().item()
+            gt_occlusion_ratio = gt_occluded / gt_pixels_total if gt_pixels_total > 0 else 0.0
+            
+            return {
+                "gt_occlusion_ratio": gt_occlusion_ratio,
+                "gt_pixels_occluded": gt_occluded,
+                "gt_pixels_total": gt_pixels_total,
+            }
+    
+    # Fallback: usa target_masks (istanze) se semseg non disponibile
+    if target_masks.numel() == 0:
+        return {
+            "gt_occlusion_ratio": 0.0,
+            "gt_pixels_occluded": 0,
+            "gt_pixels_total": 0,
+        }
+    
+    # Union di tutte le maschere GT (istanze)
     gt_union = target_masks.any(dim=0)  # [H, W]
     gt_pixels_total = gt_union.sum().item()
     
@@ -313,23 +354,37 @@ def main():
             if has_ood:
                 batches_with_ood += 1
                 
-                # S1: OOD placement
+                # S1: OOD placement (solo quando c'è OOD)
                 placement_stats = compute_ood_placement_stats(ood_mask, h, w)
-                ood_in_bottom_ratios.append(placement_stats["ood_in_bottom_ratio"])
-                ood_in_top_ratios.append(placement_stats["ood_in_top_ratio"])
-                ood_in_middle_ratios.append(placement_stats["ood_in_middle_ratio"])
+                if placement_stats["ood_in_bottom_ratio"] is not None:
+                    ood_in_bottom_ratios.append(placement_stats["ood_in_bottom_ratio"])
+                    ood_in_top_ratios.append(placement_stats["ood_in_top_ratio"])
+                    ood_in_middle_ratios.append(placement_stats["ood_in_middle_ratio"])
                 
-                # S2: OOD size
+                # S2: OOD size (solo quando c'è OOD)
                 size_stats = compute_ood_size_stats(ood_mask, h, w)
                 ood_ratios.append(size_stats["ood_ratio"])
                 ood_pixels_list.append(size_stats["ood_pixels"])
                 
-                # S3: GT occlusion
+                # S3: GT occlusion (solo quando c'è OOD)
                 if "masks" in target and target["masks"].numel() > 0:
                     occlusion_stats = compute_gt_occlusion_stats(
-                        ood_mask, target["masks"], h, w
+                        ood_mask, target["masks"], h, w, target=target
                     )
                     gt_occlusion_ratios.append(occlusion_stats["gt_occlusion_ratio"])
+                
+                # Debug: Stampa keys e shape di target (solo primo batch con OOD)
+                if batches_with_ood == 1:
+                    print(f"\n🔍 Debug: Target keys e shape (primo batch con OOD):")
+                    print(f"  Keys: {list(target.keys())}")
+                    for key, value in target.items():
+                        if isinstance(value, torch.Tensor):
+                            print(f"  {key}: shape={value.shape}, dtype={value.dtype}")
+                        elif isinstance(value, list):
+                            print(f"  {key}: list with {len(value)} elements")
+                            if len(value) > 0 and isinstance(value[0], torch.Tensor):
+                                print(f"    First element: shape={value[0].shape}, dtype={value[0].dtype}")
+                    print()
                     
                     # Salva esempio per overlay (top 10 occlusione GT)
                     if len(examples_gt_occlusion) < 10:

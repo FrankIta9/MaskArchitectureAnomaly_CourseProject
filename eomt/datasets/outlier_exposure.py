@@ -52,6 +52,8 @@ class OutlierExposureTransform(nn.Module):
         # Drivable region constraints (inspired by ClimaOoD)
         use_drivable_regions: bool = True,
         drivable_class_ids: Optional[list] = None,  # [0, 1] for road, sidewalk in Cityscapes
+        # P0 Fix: Y position range for paste (biased towards bottom = on-road)
+        paste_y_range: Tuple[float, float] = (0.55, 0.95),  # (min_ratio, max_ratio) of image height
     ):
         """
         Args:
@@ -70,6 +72,8 @@ class OutlierExposureTransform(nn.Module):
             perspective_strength: Strength of perspective effect (0.0 = disabled, 1.0 = full effect) (default: 1.0)
             use_drivable_regions: If True, only place objects on drivable regions (road/sidewalk) (default: True)
             drivable_class_ids: List of train_id class IDs for drivable regions (default: [0, 1] for Cityscapes)
+            paste_y_range: Tuple (min_ratio, max_ratio) of image height for Y position (default: (0.55, 0.95))
+                           Ensures objects are placed in lower part of image (on-road proxy)
         """
         super().__init__()
         self.outlier_dataset = outlier_dataset
@@ -102,6 +106,9 @@ class OutlierExposureTransform(nn.Module):
         # Drivable region constraints (inspired by ClimaOoD)
         self.use_drivable_regions = use_drivable_regions
         self.drivable_class_ids = drivable_class_ids if drivable_class_ids is not None else [0, 1]  # Road=0, Sidewalk=1 in Cityscapes
+        
+        # P0 Fix: Y position range for paste (biased towards bottom = on-road)
+        self.paste_y_range = paste_y_range
         
         # Task 5: Placement counters for debugging (indicative, not critical)
         # Note: These are reset at epoch start (not thread-safe with multi-worker)
