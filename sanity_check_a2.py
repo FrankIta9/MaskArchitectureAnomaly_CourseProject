@@ -216,57 +216,57 @@ def main():
         print(f"  P90: {ood_ratio_p90:.6f}")
         print(f"  P99: {ood_ratio_p99:.6f}")
         print()
-    
-    # P0 - Problema #1: Calcola overlap_ratio statistics (OOD vs GT)
-    if len(overlap_ratios) > 0:
-        overlap_ratio_min = min(overlap_ratios)
-        overlap_ratio_mean = np.mean(overlap_ratios)
-        overlap_ratio_max = max(overlap_ratios)
-        overlap_ratio_std = np.std(overlap_ratios)
         
-        # Percentili (P50, P90, P99)
-        overlap_ratio_p50 = np.percentile(overlap_ratios, 50)
-        overlap_ratio_p90 = np.percentile(overlap_ratios, 90)
-        overlap_ratio_p99 = np.percentile(overlap_ratios, 99)
-        
-        print(f"{'='*60}")
-        print("⚠️  P0 - Problema #1: Overlap Ratio (OOD vs GT)")
-        print(f"{'='*60}")
-        print(f"Overlap Ratio (frazione pixel OOD che sovrappongono GT):")
-        print(f"  Min: {overlap_ratio_min:.6f}")
-        print(f"  Mean: {overlap_ratio_mean:.6f}")
-        print(f"  Max: {overlap_ratio_max:.6f}")
-        print(f"  Std: {overlap_ratio_std:.6f}")
-        print(f"  P50 (median): {overlap_ratio_p50:.6f}")
-        print(f"  P90: {overlap_ratio_p90:.6f}")
-        print(f"  P99: {overlap_ratio_p99:.6f}")
-        print()
-        
-        # Warning se overlap_ratio è troppo alto
-        if overlap_ratio_mean > 0.10:
-            print(f"❌ CRITICO: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.10 (10%)")
-            print(f"⚠️  Questo indica un conflitto strutturale: OOD pasted sovrappone GT Cityscapes!")
-            print(f"⚠️  La loss supervisionata spinge a classificare pixel OOD come classi Cityscapes,")
-            print(f"⚠️  mentre energy/OE vuole che siano 'fuori distribuzione' (alta energia).")
-            print(f"⚠️  Questo conflitto può far peggiorare i punteggi su OOD e anche su ID.")
+        # P0 - Problema #1: Calcola overlap_ratio statistics (OOD vs GT)
+        if len(overlap_ratios) > 0:
+            overlap_ratio_min = min(overlap_ratios)
+            overlap_ratio_mean = np.mean(overlap_ratios)
+            overlap_ratio_max = max(overlap_ratios)
+            overlap_ratio_std = np.std(overlap_ratios)
+            
+            # Percentili (P50, P90, P99)
+            overlap_ratio_p50 = np.percentile(overlap_ratios, 50)
+            overlap_ratio_p90 = np.percentile(overlap_ratios, 90)
+            overlap_ratio_p99 = np.percentile(overlap_ratios, 99)
+            
+            print(f"{'='*60}")
+            print("⚠️  P0 - Problema #1: Overlap Ratio (OOD vs GT)")
+            print(f"{'='*60}")
+            print(f"Overlap Ratio (frazione pixel OOD che sovrappongono GT):")
+            print(f"  Min: {overlap_ratio_min:.6f}")
+            print(f"  Mean: {overlap_ratio_mean:.6f}")
+            print(f"  Max: {overlap_ratio_max:.6f}")
+            print(f"  Std: {overlap_ratio_std:.6f}")
+            print(f"  P50 (median): {overlap_ratio_p50:.6f}")
+            print(f"  P90: {overlap_ratio_p90:.6f}")
+            print(f"  P99: {overlap_ratio_p99:.6f}")
             print()
-            if overlap_ratio_mean > 0.30:
-                print(f"🔥 ESTREMAMENTE CRITICO: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.30 (30%)")
-                print(f"🔥 È praticamente garantito che stai sabotando il training!")
+            
+            # Warning se overlap_ratio è troppo alto
+            if overlap_ratio_mean > 0.10:
+                print(f"❌ CRITICO: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.10 (10%)")
+                print(f"⚠️  Questo indica un conflitto strutturale: OOD pasted sovrappone GT Cityscapes!")
+                print(f"⚠️  La loss supervisionata spinge a classificare pixel OOD come classi Cityscapes,")
+                print(f"⚠️  mentre energy/OE vuole che siano 'fuori distribuzione' (alta energia).")
+                print(f"⚠️  Questo conflitto può far peggiorare i punteggi su OOD e anche su ID.")
                 print()
-        elif overlap_ratio_mean > 0.05:
-            print(f"⚠️  WARNING: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.05 (5%)")
-            print(f"⚠️  Considera di rimuovere pixel pasted dalle maschere GT.")
-            print()
+                if overlap_ratio_mean > 0.30:
+                    print(f"🔥 ESTREMAMENTE CRITICO: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.30 (30%)")
+                    print(f"🔥 È praticamente garantito che stai sabotando il training!")
+                    print()
+            elif overlap_ratio_mean > 0.05:
+                print(f"⚠️  WARNING: Overlap ratio medio ({overlap_ratio_mean:.4f}) > 0.05 (5%)")
+                print(f"⚠️  Considera di rimuovere pixel pasted dalle maschere GT.")
+                print()
+            else:
+                print(f"✅ Overlap ratio medio ({overlap_ratio_mean:.4f}) <= 0.10 (10%) - OK")
+                print()
         else:
-            print(f"✅ Overlap ratio medio ({overlap_ratio_mean:.4f}) <= 0.10 (10%) - OK")
+            print(f"{'='*60}")
+            print("⚠️  P0 - Problema #1: Overlap Ratio (OOD vs GT)")
+            print(f"{'='*60}")
+            print("⚠️  Nessun overlap_ratio calcolato (nessun batch con OOD e GT masks)")
             print()
-    else:
-        print(f"{'='*60}")
-        print("⚠️  P0 - Problema #1: Overlap Ratio (OOD vs GT)")
-        print(f"{'='*60}")
-        print("⚠️  Nessun overlap_ratio calcolato (nessun batch con OOD e GT masks)")
-        print()
     else:
         print("❌ ERRORE: Nessun batch con OOD trovato!")
         print("⚠️  Questo significa che il paste COCO non sta funzionando!")
