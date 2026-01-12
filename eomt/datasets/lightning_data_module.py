@@ -21,6 +21,7 @@ class LightningDataModule(lightning.LightningDataModule):
         ignore_idx: Optional[int] = None,
         pin_memory: bool = True,
         persistent_workers: bool = True,
+        prefetch_factor: int = 2,
     ) -> None:
         super().__init__()
 
@@ -31,11 +32,16 @@ class LightningDataModule(lightning.LightningDataModule):
         self.num_classes = num_classes
 
         self.dataloader_kwargs = {
-            "persistent_workers": False if num_workers == 0 else persistent_workers,
             "num_workers": num_workers,
             "pin_memory": pin_memory,
             "batch_size": batch_size,
         }
+
+        if num_workers > 0:
+            self.dataloader_kwargs["persistent_workers"] = persistent_workers
+            self.dataloader_kwargs["prefetch_factor"] = prefetch_factor
+        else:
+            self.dataloader_kwargs["persistent_workers"] = False
 
     @staticmethod
     def train_collate(batch):
