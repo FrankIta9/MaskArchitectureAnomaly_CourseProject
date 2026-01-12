@@ -599,6 +599,35 @@ def main():
             print(f"⚠️  Gli oggetti OOD sono troppo piccoli!")
         print()
     
+    # Drivable Mask Statistics
+    print(f"{'='*60}")
+    print("Drivable Mask Statistics")
+    print(f"{'='*60}")
+    print(f"Batch totali analizzati: {total_batches}")
+    print(f"Batch con drivable_mask=None: {drivable_mask_none_count}")
+    if total_batches > 0:
+        print(f"Percentuale batch con drivable_mask=None: {(drivable_mask_none_count/total_batches*100):.2f}%")
+    print()
+    
+    if len(drivable_area_ratios) > 0:
+        drivable_area_ratio_mean = np.mean(drivable_area_ratios)
+        drivable_area_ratio_p50 = np.percentile(drivable_area_ratios, 50)
+        drivable_area_ratio_p90 = np.percentile(drivable_area_ratios, 90)
+        print(f"Drivable Area Ratio (area drivable / area totale):")
+        print(f"  Mean: {drivable_area_ratio_mean:.4f}")
+        print(f"  P50 (median): {drivable_area_ratio_p50:.4f}")
+        print(f"  P90: {drivable_area_ratio_p90:.4f}")
+        print()
+    else:
+        print("⚠️  Nessun batch con drivable_mask disponibile")
+        print()
+    
+    if total_batches > 0:
+        pct_samples_with_road_sidewalk = (samples_with_road_sidewalk / total_batches) * 100
+        print(f"Samples con labels contenenti 0 (road) o 1 (sidewalk): {samples_with_road_sidewalk}/{total_batches}")
+        print(f"Percentuale: {pct_samples_with_road_sidewalk:.2f}%")
+        print()
+    
     # S3: GT Occlusion Statistics
     if len(gt_occlusion_ratios) > 0:
         print(f"{'='*60}")
