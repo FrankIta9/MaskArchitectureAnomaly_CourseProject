@@ -580,7 +580,7 @@ class OutlierExposureTransform(nn.Module):
                 
                 # Get random outlier object (with category_name)
                 obj_img, obj_mask, category_name = self._get_random_outlier_object()
-                obj_h_orig, obj_w_orig = obj_img.shape[-2:]
+            obj_h_orig, obj_w_orig = obj_img.shape[-2:]
                 
                 # For ID paste: only use mappable categories
                 # For OOD paste: only use non-mappable categories
