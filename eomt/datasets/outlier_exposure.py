@@ -308,28 +308,15 @@ class OutlierExposureTransform(nn.Module):
         # Task 1: Build ood_mask: 1 = OOD (pasted), 0 = ID (rest)
         ood_mask = cumulative_paste_mask.to(torch.uint8)  # 1 = OOD, 0 = ID
         
-        # P0 - Problema #1 (CRITICO): Rimuovi pixel pasted dalle maschere GT
-        # Questo evita conflitto strutturale: la loss supervisionata non deve spingere
-        # a classificare pixel OOD come classi Cityscapes
-        if "masks" in target and target["masks"].numel() > 0:
-            pm = cumulative_paste_mask  # [H, W] bool
-            target["masks"] = target["masks"].clone()  # Clone per evitare side effects
-            # Rimuovi pixel pasted da tutte le maschere GT
-            target["masks"][:, pm] = False
-            
-            # P0 - Problema #1 (opzionale ma utile): Filtra maschere diventate vuote/piccolissime
-            # Calcola area rimanente per ogni maschera
-            mask_areas = target["masks"].sum(dim=(1, 2))  # [num_masks]
-            min_mask_area = 10  # Soglia minima (es. 10 pixel)
-            keep = mask_areas >= min_mask_area  # [num_masks] bool
-            
-            if keep.any() and not keep.all():
-                # Alcune maschere sono diventate troppo piccole, rimuovile
-                target["masks"] = target["masks"][keep]
-                if "labels" in target:
-                    target["labels"] = [target["labels"][i] for i in range(len(target["labels"])) if keep[i]]
-                if "is_crowd" in target:
-                    target["is_crowd"] = [target["is_crowd"][i] for i in range(len(target["is_crowd"])) if keep[i]]
+        # P0 Fix: NON modificare target["masks"] dentro Outlier Exposure
+        # Problema: pm è alla risoluzione finale (es. 1024x1024) ma target["masks"]
+        # può essere ancora alla risoluzione originale (es. 1552x2079), causando mismatch.
+        # OE non deve toccare le GT masks - il conflitto OOD vs GT può essere gestito
+        # nella loss settando i pixel OOD come ignore (255) o usando ood_mask.
+        #
+        # ❌ RIMOSSO (causava crash per mismatch di risoluzione):
+        # target["masks"][:, pm] = False
+        # e filtraggio maschere vuote
         
         # Optional: Set 255 for ignore pixels (where target is ignore)
         # Note: In Cityscapes, ignore pixels are filtered in target_parser, so this is optional
