@@ -128,6 +128,19 @@ def main():
             
             ood_mask = target["ood_mask"]  # [H, W]
             
+            # Debug: Verifica che semseg sotto OOD sia IGNORE (255)
+            if "semseg" in target and batch_idx == 0 and sample_idx == 0:
+                ood = target["ood_mask"].bool()
+                if ood.any():
+                    vals = torch.unique(target["semseg"][ood])
+                    print(f"🔍 Debug (batch 0, sample 0): unique semseg under OOD: {vals.tolist()}")
+                    if len(vals) == 1 and vals[0] == 255:
+                        print("  ✅ OK: Tutti i pixel OOD sono IGNORE (255)")
+                    else:
+                        print(f"  ⚠️  WARNING: Alcuni pixel OOD non sono IGNORE! Valori: {vals.tolist()}")
+                else:
+                    print("  ℹ️  Nessun pixel OOD in questo sample")
+            
             # P0 - Problema #1: Check overlap_ratio (OOD vs GT)
             overlap_ratio = None
             IGNORE = 255
