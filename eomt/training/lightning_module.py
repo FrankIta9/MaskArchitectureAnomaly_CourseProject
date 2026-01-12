@@ -636,10 +636,10 @@ class LightningModule(lightning.LightningModule):
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_id_buffer)
                                 if not self._energy_margins_computed and current_step < self._energy_margin_calculation_steps:
                                     # Accumulate individual values (sample to avoid memory issues)
-                                    energy_id_values = energy_id.detach().cpu().numpy()
+                                    energy_id_values = energy_id.detach().cpu().numpy().flatten()  # Flatten to 1D array
                                     # Sample up to 1000 values per batch to avoid memory explosion
                                     if len(energy_id_values) > 1000:
-                                        indices = np.random.choice(len(energy_id_values), 1000, replace=False)
+                                        indices = np.random.choice(len(energy_id_values), size=1000, replace=False)
                                         energy_id_values = energy_id_values[indices]
                                     self._energy_id_buffer.extend(energy_id_values.tolist())
                             
@@ -669,10 +669,10 @@ class LightningModule(lightning.LightningModule):
                                 current_step = self.trainer.global_step if hasattr(self, 'trainer') and self.trainer else len(self._energy_ood_buffer)
                                 if not self._energy_margins_computed and current_step < self._energy_margin_calculation_steps:
                                     # Accumulate individual values (sample to avoid memory issues)
-                                    energy_ood_values = energy_ood.detach().cpu().numpy()
+                                    energy_ood_values = energy_ood.detach().cpu().numpy().flatten()  # Flatten to 1D array
                                     # Sample up to 1000 values per batch to avoid memory explosion
                                     if len(energy_ood_values) > 1000:
-                                        indices = np.random.choice(len(energy_ood_values), 1000, replace=False)
+                                        indices = np.random.choice(len(energy_ood_values), size=1000, replace=False)
                                         energy_ood_values = energy_ood_values[indices]
                                     self._energy_ood_buffer.extend(energy_ood_values.tolist())
                             
