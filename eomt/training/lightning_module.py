@@ -783,16 +783,20 @@ class LightningModule(lightning.LightningModule):
                             0, 255
                         ).astype(np.uint8)
                         
-                        # Log overlay as wandb image if logger is available
+                        # Log overlay as wandb image if logger is available and is WandbLogger
                         if hasattr(self, 'logger') and self.logger is not None:
                             try:
-                                from PIL import Image as PILImage
-                                overlay_pil = PILImage.fromarray(overlay)
-                                # Log to wandb
-                                self.logger.experiment.log({
-                                    f"check/ood_mask_overlay_batch{batch_idx}_sample{i}": [wandb.Image(overlay_pil, caption=f"OOD mask overlay (red=OOD, batch {batch_idx}, sample {i})")]
-                                })
-                                logging.info(f"✅ Task 1: Logged ood_mask overlay for batch {batch_idx}, sample {i}")
+                                from lightning.pytorch.loggers.wandb import WandbLogger
+                                if isinstance(self.logger, WandbLogger):
+                                    from PIL import Image as PILImage
+                                    overlay_pil = PILImage.fromarray(overlay)
+                                    # Log to wandb
+                                    self.logger.experiment.log({
+                                        f"check/ood_mask_overlay_batch{batch_idx}_sample{i}": [wandb.Image(overlay_pil, caption=f"OOD mask overlay (red=OOD, batch {batch_idx}, sample {i})")]
+                                    })
+                                    logging.info(f"✅ Task 1: Logged ood_mask overlay for batch {batch_idx}, sample {i}")
+                                else:
+                                    logging.debug(f"ℹ️ Task 1: Logger is not WandbLogger (type={type(self.logger).__name__}), skipping wandb log")
                             except Exception as e:
                                 logging.warning(f"⚠️ Task 1: Failed to log overlay: {e}")
                     except Exception as e:
@@ -1560,7 +1564,17 @@ class LightningModule(lightning.LightningModule):
 
         block_postfix = self.block_postfix(block_idx)
         name = f"{log_prefix}_pred_{batch_idx}{block_postfix}"
-        self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
+        
+        # Check if logger is WandbLogger before using wandb-specific methods
+        try:
+            from lightning.pytorch.loggers.wandb import WandbLogger
+            if isinstance(self.trainer.logger, WandbLogger):
+                self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
+            else:
+                # For other loggers (e.g., TensorBoard), skip wandb-specific logging
+                logging.debug(f"ℹ️ Logger is not WandbLogger (type={type(self.trainer.logger).__name__}), skipping wandb log for {name}")
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to log semantic prediction: {e}")
 
     @torch.compiler.disable
     def scale_img_size_semantic(self, size: tuple[int, int]):
