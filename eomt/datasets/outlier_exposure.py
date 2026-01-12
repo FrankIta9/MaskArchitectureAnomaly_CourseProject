@@ -121,9 +121,10 @@ class OutlierExposureTransform(nn.Module):
         self.drivable_placement_count = 0
         self.random_placement_count = 0
         
-        # FIX 4: Debug counter for logging (first 20 samples only)
+        # FIX 4: Debug counter for logging (first 2 batches only, ~4-6 samples)
         self._dbg_count = 0
-        self._resample_warn_logged = False  # Log resample warning only once
+        self._dbg_max_count = 6  # Limit to first ~2 batches (batch_size=2-3)
+        self._resample_warn_logged = False  # Disabled: resample is silent (no logging)
     
     def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -376,8 +377,8 @@ class OutlierExposureTransform(nn.Module):
                     img, target, obj_img, obj_mask, (x, y), scale
                 )
                 
-                # LOG 2: Debug logging for first 20 samples
-                if self._dbg_count < 20:
+                # LOG 2: Debug logging for first 2 batches only (silent after)
+                if self._dbg_count < self._dbg_max_count:
                     ood_ratio_obj = paste_mask.float().mean().item() if paste_mask.numel() > 0 else 0.0
                     y_norm = float(y) / max(1.0, float(h - 1))
                     print(f"[OE Debug {self._dbg_count}] y={y} (norm={y_norm:.3f}), base_scale={base_scale:.4f}, final_scale={scale:.4f}, obj_h={obj_h_scaled}, obj_w={obj_w_scaled}, ood_ratio={ood_ratio_obj:.6f}")
@@ -390,20 +391,14 @@ class OutlierExposureTransform(nn.Module):
             ood_ratio = cumulative_paste_mask.float().mean().item()
             
             # Config finale: cap "paste troppo grande" - ood_ratio_max = 0.05
+            # Silent resample: no logging to avoid performance impact
             OOD_RATIO_MAX = 0.05
             if ood_ratio > OOD_RATIO_MAX:
-                # Paste troppo grande, resample
-                if resample_attempt == 0 and not self._resample_warn_logged:
-                    import logging
-                    logging.warning(f"⚠️ [OE] ood_ratio={ood_ratio:.6f} > {OOD_RATIO_MAX}, resample {resample_attempt + 1}/{MAX_RESAMPLE}")
-                    self._resample_warn_logged = True
-                
+                # Paste troppo grande, resample (silent)
                 if resample_attempt < MAX_RESAMPLE - 1:
                     continue  # Resample
                 else:
-                    # After max attempts, accept but log warning
-                    import logging
-                    logging.warning(f"⚠️ [OE] ood_ratio={ood_ratio:.6f} still > {OOD_RATIO_MAX} after {MAX_RESAMPLE} attempts, accepting")
+                    # After max attempts, accept silently
                     break
             
             # Check anche min object size (per ridurre resample)
@@ -414,25 +409,11 @@ class OutlierExposureTransform(nn.Module):
                 # Accept this paste
                 break
             else:
-                # LOG 3: Log resample attempt (only once)
-                if resample_attempt == 0 and not self._resample_warn_logged:
-                    import logging
-                    reason = []
-                    if ood_ratio < OOD_RATIO_MIN:
-                        reason.append(f"ood_ratio={ood_ratio:.6f} < {OOD_RATIO_MIN}")
-                    if not min_obj_size_ok:
-                        reason.append(f"obj_size={ood_pixels} < {self.min_obj_size_px**2}")
-                    logging.warning(f"⚠️ [OE] {' and '.join(reason)}, resample {resample_attempt + 1}/{MAX_RESAMPLE}")
-                    self._resample_warn_logged = True
-                
+                # Silent resample: no logging to avoid performance impact
                 # Restore original image for resample
                 if resample_attempt < MAX_RESAMPLE - 1:
                     img = img_original
-                else:
-                    # After max attempts, accept but log warning
-                    if resample_attempt == MAX_RESAMPLE - 1:
-                        import logging
-                        logging.warning(f"⚠️ [OE] ood_ratio={ood_ratio:.6f} still < {OOD_RATIO_MIN} after {MAX_RESAMPLE} attempts, accepting")
+                # After max attempts, accept silently (no logging)
         
         # Task 1: Build ood_mask: 1 = OOD (pasted), 0 = ID (rest)
         ood_mask = cumulative_paste_mask.to(torch.uint8)  # 1 = OOD, 0 = ID
