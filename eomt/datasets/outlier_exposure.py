@@ -327,9 +327,13 @@ class OutlierExposureTransform(nn.Module):
             
             write_mask = obj_mask_resized.clone()
             
-            # Constraint: solo valid_mask (no padding/letterbox)
+            # Constraint: solo valid_mask (no padding/letterbox) se coerente con img
             region_mask = None
-            if "valid_mask" in target:
+            if (
+                "valid_mask" in target
+                and torch.is_tensor(target["valid_mask"])
+                and target["valid_mask"].shape == (h, w)
+            ):
                 vm_patch = target["valid_mask"][y:y_end, x:x_end].to(torch.bool)
                 vm_sum = vm_patch.sum().item()
                 region_mask = vm_patch
@@ -397,22 +401,51 @@ class OutlierExposureTransform(nn.Module):
                     
                     return img, target, paste_mask, False  # Skip oggetto (overlap troppo alto)
             
-            # FIX 2: Usa patch locale invece di doppio indexing
+            # Keep semseg/masks consistent with the paste
             if "semseg" in target:
                 semseg_patch = target["semseg"][y:y_end, x:x_end].clone()  # [H_patch, W_patch]
-                
+
                 if category_name in COCO_TO_CS_TRAINID:
                     # ID AUGMENTATION: Mappable category → supervised paste
-                    cs_trainid = COCO_TO_CS_TRAINID[category_name]
-                    # Scrivi su write_mask (può sovrascrivere pixel validi, ok per ID augmentation)
+                    cs_trainid = int(COCO_TO_CS_TRAINID[category_name])
                     semseg_patch[write_mask] = cs_trainid
                     target["semseg"][y:y_end, x:x_end] = semseg_patch
-                    # ood_mask stays 0 (not set to 1)
+
+                    # Update masks/labels to include the pasted region
+                    if "masks" in target and "labels" in target and torch.is_tensor(target["masks"]):
+                        labels = target["labels"]
+                        if not torch.is_tensor(labels):
+                            labels = torch.tensor(labels, dtype=torch.long, device=target["masks"].device)
+                        else:
+                            labels = labels.to(dtype=torch.long)
+
+                        match = (labels == cs_trainid).nonzero(as_tuple=False)
+                        if match.numel() > 0:
+                            class_idx = int(match[0].item())
+                            masks_patch = target["masks"][class_idx, y:y_end, x:x_end]
+                            masks_patch[write_mask] = True
+                            target["masks"][class_idx, y:y_end, x:x_end] = masks_patch
+                        else:
+                            new_mask = torch.zeros((h, w), dtype=torch.bool, device=target["masks"].device)
+                            new_mask[y:y_end, x:x_end] = write_mask
+                            target["masks"] = torch.cat([target["masks"].to(torch.bool), new_mask.unsqueeze(0)], dim=0)
+                            target["labels"] = torch.cat([labels, torch.tensor([cs_trainid], device=labels.device, dtype=labels.dtype)], dim=0)
+                            if "is_crowd" in target and torch.is_tensor(target["is_crowd"]):
+                                target["is_crowd"] = torch.cat(
+                                    [target["is_crowd"].to(torch.bool), torch.zeros(1, device=target["is_crowd"].device, dtype=torch.bool)],
+                                    dim=0,
+                                )
+
                 else:
                     # OOD AUGMENTATION: Non-mappable category → outlier exposure
-                    # NON scrivere su semseg (lascia invariato) - ood_mask gestirà l'ignore nelle metriche
-                    # semseg rimane invariato, ood_mask sarà 1 per questi pixel
-                    pass
+                    # Mark these pixels as IGNORE in semseg and remove them from class masks
+                    semseg_patch[write_mask] = 255
+                    target["semseg"][y:y_end, x:x_end] = semseg_patch
+
+                    if "masks" in target and torch.is_tensor(target["masks"]) and target["masks"].ndim == 3:
+                        masks_patch_all = target["masks"][:, y:y_end, x:x_end]
+                        masks_patch_all[:, write_mask] = False
+                        target["masks"][:, y:y_end, x:x_end] = masks_patch_all
             
             # FIX 3: paste_mask deve essere esattamente write_mask (non obj_mask_resized)
             # Questo garantisce che paste_mask == pixel dove abbiamo scritto davvero
@@ -552,237 +585,135 @@ class OutlierExposureTransform(nn.Module):
         
         # Accumulate paste_mask from all pasted objects
         cumulative_paste_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
-        
-        # FIX 4: Resample loop if ood_ratio too small
+
+        # Keep original state for resampling
+        img_original = img.clone()
+        target_original: Dict[str, Any] = {}
+        for k, v in target.items():
+            if torch.is_tensor(v):
+                target_original[k] = v.clone()
+            elif isinstance(v, list):
+                target_original[k] = v.copy()
+            else:
+                target_original[k] = v
+
+        # FIX 4: Resample loop if ood_ratio too small/large
         for resample_attempt in range(MAX_RESAMPLE):
-            # Reset cumulative mask for resample
             if resample_attempt > 0:
                 cumulative_paste_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
-                img = img_original.clone()  # Restore original image for resample
-            
-            img_original = img.clone()  # Keep original image for resample
-            
+                img = img_original.clone()
+                # restore target too (paste modifies semseg/masks)
+                restored: Dict[str, Any] = {}
+                for k, v in target_original.items():
+                    if torch.is_tensor(v):
+                        restored[k] = v.clone()
+                    elif isinstance(v, list):
+                        restored[k] = v.copy()
+                    else:
+                        restored[k] = v
+                target = restored
+
             for obj_idx in range(num_objects):
                 # Decide paste type for this object (ID or OOD)
-                # If both are enabled, alternate or use probability
                 if do_id_paste and do_ood_paste:
-                    # Alternate or random: 50% ID, 50% OOD
-                    is_id_paste = (obj_idx % 2 == 0) if random.random() < 0.5 else random.random() < 0.5
+                    is_id_paste = (obj_idx % 2 == 0) if random.random() < 0.5 else (random.random() < 0.5)
                 elif do_id_paste:
                     is_id_paste = True
-                elif do_ood_paste:
+                else:
                     is_id_paste = False
-                    # Count attempted OOD paste
                     if self._log_reality_check:
                         self._attempted_ood += 1
-                else:
-                    continue  # Should not happen, but safety check
-                
-                # Get random outlier object (with category_name)
+
+                # Sample object with retries to match desired category type
+                max_retries = 10
                 obj_img, obj_mask, category_name = self._get_random_outlier_object()
-                obj_h_orig, obj_w_orig = obj_img.shape[-2:]
-                
-                # For ID paste: only use mappable categories
-                # For OOD paste: only use non-mappable categories
                 if is_id_paste:
+                    retry_count = 0
+                    while category_name not in COCO_TO_CS_TRAINID and retry_count < max_retries:
+                        obj_img, obj_mask, category_name = self._get_random_outlier_object()
+                        retry_count += 1
                     if category_name not in COCO_TO_CS_TRAINID:
-                        # Skip: this category is not mappable, try another object
-                        max_retries = 10
-                        retry_count = 0
-                        while retry_count < max_retries:
-                            obj_img, obj_mask, category_name = self._get_random_outlier_object()
-                            if category_name in COCO_TO_CS_TRAINID:
-                                break
-                            retry_count += 1
-                        if retry_count >= max_retries:
-                            continue  # Skip this object if no mappable category found
+                        continue
                 else:
+                    retry_count = 0
+                    while category_name in COCO_TO_CS_TRAINID and retry_count < max_retries:
+                        obj_img, obj_mask, category_name = self._get_random_outlier_object()
+                        retry_count += 1
                     if category_name in COCO_TO_CS_TRAINID:
-                        # Skip: this category is mappable, try another object
-                        max_retries = 10
-                        retry_count = 0
-                        while retry_count < max_retries:
-                            obj_img, obj_mask, category_name = self._get_random_outlier_object()
-                            if category_name not in COCO_TO_CS_TRAINID:
-                                break
-                            retry_count += 1
-                        if retry_count >= max_retries:
-                            continue  # Skip this object if no non-mappable category found
-            
-            # Select base scale using weighted distribution if enabled, otherwise uniform
-            if self.use_weighted_scale:
-                base_scale = self._sample_weighted_scale()
-            else:
-                base_scale = random.uniform(self.min_scale, self.max_scale)
-            
-                # P0 Fix: Ordine ottimizzato - se drivable_mask disponibile, scegli (x,y) PRIMA, poi calcola scale
-                # Se drivable_mask non disponibile, usa ordine classico (y -> scale -> x)
-            if drivable_mask is not None and drivable_mask.any():
-                    # ORDINE NUOVO: prima scegli (x,y) drivable, poi calcola scale basato su y
-                    # Usa dimensioni iniziali stimate per trovare posizione valida
-                    obj_h_est = max(1, int(obj_h_orig * base_scale))
-                    obj_w_est = max(1, int(obj_w_orig * base_scale))
-                    obj_h_est = min(obj_h_est, h)
-                    obj_w_est = min(obj_w_est, w)
-                    
-                    # Prova a trovare posizione drivable
+                        continue
+
+                obj_h_orig, obj_w_orig = obj_img.shape[-2:]
+
+                base_scale = self._sample_weighted_scale() if self.use_weighted_scale else random.uniform(self.min_scale, self.max_scale)
+
+                # Estimated size (used for placement constraints)
+                obj_h_est = min(max(1, int(obj_h_orig * base_scale)), h)
+                obj_w_est = min(max(1, int(obj_w_orig * base_scale)), w)
+
+                # Pick a position (prefer drivable), then compute final scale using y
+                position = None
+                if drivable_mask is not None and drivable_mask.any():
                     position = self._sample_drivable_position(drivable_mask, obj_h_est, obj_w_est, h, w)
                     if position is not None:
-                        x, y = position
                         self.drivable_placement_count += 1
-                        
-                        # Ora calcola scale basato su y scelto
-                        scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                        scale = max(self.min_scale, min(self.max_scale * 2.0, scale))  # Allow up to 2.0x for perspective
-                        
-                        # Ricalcola dimensioni con scale finale
-                        obj_h_scaled = max(1, int(obj_h_orig * scale))
-                        obj_w_scaled = max(1, int(obj_w_orig * scale))
-                        obj_h_scaled = min(obj_h_scaled, h)
-                        obj_w_scaled = min(obj_w_scaled, w)
-                        
-                        # Fix 4: Validare che dopo ricalcolo dimensioni, posizione sia ancora valida
-                        y_end = min(y + obj_h_scaled, h)
-                        x_end = min(x + obj_w_scaled, w)
-                        region = drivable_mask[y:y_end, x:x_end]
-                        if region.numel() == 0 or (region.float().mean().item() < 0.6):
-                            # Riprova con dimensioni finali
-                            position2 = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
-                            if position2 is not None:
-                                x, y = position2
-                else:
-                                # Fallback safe: random solo in valid+bottom
-                                y_min = int(0.7 * h)
-                                x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
-                                if x is None:
-                                    if self._log_reality_check:
-                                        self._skipped_no_position += 1
-                                    continue  # Skip this object
-            else:
-                            # Verifica che l'oggetto ci stia ancora nella posizione scelta
-                            if x + obj_w_scaled > w or y + obj_h_scaled > h:
-                                # Se non ci sta, clamp x,y
-                                x = min(x, max(0, w - obj_w_scaled))
-                                y = min(y, max(0, h - obj_h_scaled))
-                    else:
-                        # Fallback safe: random solo in valid+bottom (non continue aggressivo)
-                        y_min = int(0.7 * h)
-                        x, y = self._fallback_safe_position(target, obj_h_est, obj_w_est, h, w, y_min)
-                        if x is None:
-                            if self._log_reality_check:
-                                self._skipped_no_position += 1
-                            continue  # Skip this object if no valid position
-                        # Calcola scale anche per fallback
-                        scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                        scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
-                        # Ricalcola dimensioni con scale finale per fallback
-                        obj_h_scaled = max(1, int(obj_h_orig * scale))
-                        obj_w_scaled = max(1, int(obj_w_orig * scale))
-                        obj_h_scaled = min(obj_h_scaled, h)
-                        obj_w_scaled = min(obj_w_scaled, w)
-            else:
-                # ORDINE CLASSICO: y -> scale -> x (quando non c'è drivable_mask)
-                # Fix: Assicura che anche qui non finisca nel padding
-                y_min_ratio, y_max_ratio = self.paste_y_range
-                y_min = int(y_min_ratio * h)
-                y_max = int(y_max_ratio * h)
-                y = random.randint(y_min, y_max)
-                
+
+                if position is None:
+                    x, y = self._fallback_safe_position(target, obj_h_est, obj_w_est, h, w, y_min)
+                    if x is None:
+                        if self._log_reality_check:
+                            self._skipped_no_position += 1
+                        continue
+                    position = (x, y)
+                    self.random_placement_count += 1
+
+                x, y = position
                 scale = self._apply_perspective_aware_scale(base_scale, y, h)
                 scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
-                
-            obj_h_scaled = max(1, int(obj_h_orig * scale))
-            obj_w_scaled = max(1, int(obj_w_orig * scale))
-            obj_h_scaled = min(obj_h_scaled, h)
-            obj_w_scaled = min(obj_w_scaled, w)
-            
-            # Fix: Usa fallback_safe_position anche qui per evitare padding
-            x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
-            if x is None:
-                if self._log_reality_check:
-                    self._skipped_no_position += 1
-                continue  # Skip this object if no valid position
-            self.random_placement_count += 1
-            
-            # Paste object and get paste_mask (with category_name for ID/OOD distinction)
-            img, target, paste_mask, success = self._paste_object(
-                img, target, obj_img, obj_mask, (x, y), scale, category_name
-            )
-            
-            # Skip if paste failed (e.g., overlap too high)
-            if not success:
-                continue
-                
-                # LOG 2: Debug logging for first 2 batches only (silent after)
+
+                obj_h_scaled = min(max(1, int(obj_h_orig * scale)), h)
+                obj_w_scaled = min(max(1, int(obj_w_orig * scale)), w)
+
+                # Clamp to ensure it fits
+                x = min(max(0, x), max(0, w - obj_w_scaled))
+                y = min(max(0, y), max(0, h - obj_h_scaled))
+
+                img, target, paste_mask, success = self._paste_object(
+                    img, target, obj_img, obj_mask, (x, y), scale, category_name
+                )
+                if not success:
+                    continue
+
+                # Debug logging for first few samples
                 if self._dbg_count < self._dbg_max_count:
                     ood_ratio_obj = paste_mask.float().mean().item() if paste_mask.numel() > 0 else 0.0
                     y_norm = float(y) / max(1.0, float(h - 1))
                     paste_type = "ID" if category_name in COCO_TO_CS_TRAINID else "OOD"
-                    print(f"[OE Debug {self._dbg_count}] {paste_type} paste: cat={category_name}, y={y} (norm={y_norm:.3f}), base_scale={base_scale:.4f}, final_scale={scale:.4f}, obj_h={obj_h_scaled}, obj_w={obj_w_scaled}, ood_ratio={ood_ratio_obj:.6f}")
+                    print(
+                        f"[OE Debug {self._dbg_count}] {paste_type} paste: cat={category_name}, y={y} (norm={y_norm:.3f}), "
+                        f"base_scale={base_scale:.4f}, final_scale={scale:.4f}, obj_h={obj_h_scaled}, obj_w={obj_w_scaled}, ood_ratio={ood_ratio_obj:.6f}"
+                    )
                     self._dbg_count += 1
-                
-                # Accumulate paste_mask (only for OOD, ID paste doesn't set ood_mask)
-                # For OOD paste: paste_mask indicates OOD pixels
-                # For ID paste: paste_mask is still tracked but ood_mask stays 0
+
+                # Accumulate OOD pixels only
                 if category_name not in COCO_TO_CS_TRAINID:
-                    # 3) Verifica che cumulative_paste_mask si aggiorni davvero
-                    # 4) Controllo dtype: assicurati che paste_mask sia bool
                     if paste_mask.dtype != torch.bool:
                         paste_mask = paste_mask.bool()
-                    
-                    cumulative_sum_before = cumulative_paste_mask.sum().item()
-                    paste_mask_sum_for_cumulative = paste_mask.sum().item()
-                    
                     cumulative_paste_mask = cumulative_paste_mask | paste_mask
-                    cumulative_sum_after = cumulative_paste_mask.sum().item()
-                    
-                    # Assert: cumulative_paste_mask deve aumentare
-                    cumulative_increase = cumulative_sum_after - cumulative_sum_before
-                    assert cumulative_increase >= paste_mask_sum_for_cumulative - 5, \
-                        f"cumulative_paste_mask not updated correctly: increase={cumulative_increase}, expected>={paste_mask_sum_for_cumulative - 5}"
-                    
-                    # Paste trace: log cumulative (solo per OOD)
-                    if self._paste_trace_enabled:
-                        import logging
-                        logging.info(
-                            f"🔍 Paste Trace (CUMULATIVE) - cumulative_before={cumulative_sum_before}, "
-                            f"paste_mask_sum={paste_mask_sum_for_cumulative}, cumulative_after={cumulative_sum_after}"
-                        )
-                    
-                    # Count successful OOD paste
-                    if self._log_reality_check and success:
+                    if self._log_reality_check:
                         self._pasted_ood += 1
-                    # Count successful OOD paste
-                    if self._log_reality_check and success:
-                        self._pasted_ood += 1
-            
-            # FIX 4: Check ood_ratio and min object size after all objects pasted
+
+            # Check ood_ratio and min object size after pasting
             ood_ratio = cumulative_paste_mask.float().mean().item()
-            
-            # Config finale: cap "paste troppo grande" - ood_ratio_max ridotto per non distruggere ID
-            # Silent resample: no logging to avoid performance impact
-            OOD_RATIO_MAX = 0.03  # Ridotto da 0.05 a 0.03 per meno aggressività (0.02-0.03 range)
-            if ood_ratio > OOD_RATIO_MAX:
-                # Paste troppo grande, resample (silent)
-                if resample_attempt < MAX_RESAMPLE - 1:
-                    continue  # Resample
-            else:
-                    # After max attempts, accept silently
-                    break
-            
-            # Check anche min object size (per ridurre resample)
-            ood_pixels = cumulative_paste_mask.sum().item()
-            min_obj_size_ok = ood_pixels >= (self.min_obj_size_px ** 2)  # Area minima
-            
-            if ood_ratio >= OOD_RATIO_MIN and min_obj_size_ok:
-                # Accept this paste
-                break
-            else:
-                # Silent resample: no logging to avoid performance impact
-                # Restore original image for resample
-                if resample_attempt < MAX_RESAMPLE - 1:
-                    img = img_original
-                # After max attempts, accept silently (no logging)
+            ood_pixels = int(cumulative_paste_mask.sum().item())
+            min_obj_size_ok = ood_pixels >= (self.min_obj_size_px ** 2)
+
+            OOD_RATIO_MAX = 0.03
+
+            need_resample = (ood_ratio > OOD_RATIO_MAX) or (ood_ratio < OOD_RATIO_MIN) or (not min_obj_size_ok)
+            if need_resample and resample_attempt < MAX_RESAMPLE - 1:
+                continue
+
+            break
         
         # Task 1: Build ood_mask: 1 = OOD (non-mappable pasted), 0 = ID (rest)
         # Note: ID paste (mappable) does NOT set ood_mask to 1 (it stays 0)
@@ -1056,7 +987,7 @@ class OutlierExposureTransform(nn.Module):
                 if y < y_low_relaxed:
                     continue
                 if y <= max_y and x <= max_x:
-                valid_positions.append([y, x])
+                    valid_positions.append([y, x])
         
         if len(valid_positions) == 0:
             return None
@@ -1407,7 +1338,7 @@ class COCOOutlierDataset:
     
     def __del__(self):
         """Cleanup temporary files."""
-        if hasattr(self, 'temp_ann_file') and hasattr(self, 'temp_ann_file'):
+        if hasattr(self, 'temp_ann_file'):
             import os
             try:
                 os.unlink(self.temp_ann_file)
