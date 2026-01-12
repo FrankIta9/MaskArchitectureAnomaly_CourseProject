@@ -37,8 +37,10 @@ class CityscapesSemanticWithOE(LightningDataModule):
         coco_path: Optional[str] = None,
         coco_split: str = "train2017",
         use_coco_zip: bool = False,
-        coco_allowed_category_ids: Optional[list[int]] = None,
-        paste_probability: float = 0.5,
+        paste_probability: float = 0.5,  # DEPRECATED: use p_id_paste and p_ood_paste instead
+        p_id_paste: float = 0.10,  # Probability of ID paste (mappable COCO → Cityscapes)
+        p_ood_paste: float = 0.30,  # Probability of OOD paste (non-mappable COCO)
+        max_overlap_ratio: float = 0.02,  # Max overlap with existing GT (0.02 = 2%)
         min_objects: int = 1,
         max_objects: int = 3,
         min_scale: float = 0.1,
@@ -103,11 +105,14 @@ class CityscapesSemanticWithOE(LightningDataModule):
                     split=coco_split,
                     min_area=coco_min_area,
                     use_zip=use_coco_zip,
-                    allowed_category_ids=coco_allowed_category_ids,
+                    # No allowed_category_ids: hybrid strategy uses all categories
                 )
                 outlier_exposure_transform = OutlierExposureTransform(
                     outlier_dataset=coco_dataset,
-                    paste_probability=paste_probability,
+                    paste_probability=paste_probability,  # For backward compatibility
+                    p_id_paste=p_id_paste,
+                    p_ood_paste=p_ood_paste,
+                    max_overlap_ratio=max_overlap_ratio,
                     min_objects=min_objects,
                     max_objects=max_objects,
                     min_scale=min_scale,

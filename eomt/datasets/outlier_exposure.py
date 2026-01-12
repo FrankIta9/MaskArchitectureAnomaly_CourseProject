@@ -24,48 +24,23 @@ except ImportError:
     COCO_AVAILABLE = False
     print("Warning: pycocotools not available. Install with: pip install pycocotools")
 
-# COCO category whitelist: indoor + sport + appliances (exclude person/vehicles)
-# Indoor: furniture, electronics, household items
-# Sport: sports equipment
-# Appliances: kitchen and household appliances
-COCO_WHITELIST_INDOOR_SPORT_APPLIANCES = [
-    # Indoor furniture and items
-    62,  # chair
-    63,  # couch
-    65,  # bed
-    67,  # dining table
-    70,  # toilet
-    72,  # tv
-    73,  # laptop
-    74,  # mouse
-    75,  # remote
-    76,  # keyboard
-    77,  # cell phone
-    81,  # sink
-    84,  # book
-    85,  # clock
-    86,  # vase
-    87,  # scissors
-    88,  # teddy bear
-    90,  # toothbrush
-    # Sport equipment
-    37,  # sports ball
-    38,  # kite
-    39,  # baseball bat
-    40,  # baseball glove
-    41,  # skateboard
-    42,  # surfboard
-    43,  # tennis racket
-    44,  # frisbee
-    45,  # skis
-    46,  # snowboard
-    # Appliances
-    78,  # microwave
-    79,  # oven
-    80,  # toaster
-    82,  # refrigerator
-    89,  # hair drier
-]
+# Mapping COCO category names → Cityscapes trainId (for ID augmentation)
+# Categories NOT in this mapping are treated as OOD (semseg=255, ood_mask=1)
+# Cityscapes trainId: road 0, sidewalk 1, building 2, wall 3, fence 4, pole 5,
+#                     traffic light 6, traffic sign 7, vegetation 8, terrain 9, sky 10,
+#                     person 11, rider 12, car 13, truck 14, bus 15, train 16,
+#                     motorcycle 17, bicycle 18
+COCO_TO_CS_TRAINID = {
+    "person": 11,
+    "bicycle": 18,
+    "car": 13,
+    "motorcycle": 17,
+    "bus": 15,
+    "truck": 14,
+    "train": 16,
+    "traffic light": 6,
+    "stop sign": 7,  # treat as traffic sign
+}
 
 
 class OutlierExposureTransform(nn.Module):
@@ -79,12 +54,15 @@ class OutlierExposureTransform(nn.Module):
     def __init__(
         self,
         outlier_dataset: Optional[Any] = None,
-        paste_probability: float = 0.5,
+        paste_probability: float = 0.5,  # DEPRECATED: use p_id_paste and p_ood_paste instead
+        p_id_paste: float = 0.10,  # Probability of ID paste (mappable COCO → Cityscapes)
+        p_ood_paste: float = 0.30,  # Probability of OOD paste (non-mappable COCO)
         min_objects: int = 1,
         max_objects: int = 3,
         min_scale: float = 0.1,
         max_scale: float = 0.3,
         blend_alpha: float = 1.0,  # 1.0 = dry paste (more stable), 0.8 for blending
+        max_overlap_ratio: float = 0.02,  # Max overlap with existing GT (0.02 = 2%)
         # Multi-scale weighted distribution (for better matching with small anomalies)
         use_weighted_scale: bool = False,
         scale_ranges: Optional[list] = None,  # [(min1, max1), (min2, max2), ...]
@@ -123,7 +101,11 @@ class OutlierExposureTransform(nn.Module):
         """
         super().__init__()
         self.outlier_dataset = outlier_dataset
-        self.paste_probability = paste_probability
+        # Use separate probabilities for ID and OOD paste
+        self.p_id_paste = p_id_paste if p_id_paste is not None else (paste_probability * 0.2)  # Fallback for backward compat
+        self.p_ood_paste = p_ood_paste if p_ood_paste is not None else (paste_probability * 0.8)  # Fallback for backward compat
+        self.paste_probability = paste_probability  # Keep for backward compatibility
+        self.max_overlap_ratio = max_overlap_ratio
         self.min_objects = min_objects
         self.max_objects = max_objects
         self.min_scale = min_scale
@@ -169,18 +151,18 @@ class OutlierExposureTransform(nn.Module):
         self._dbg_max_count = 6  # Limit to first ~2 batches (batch_size=2-3)
         self._resample_warn_logged = False  # Disabled: resample is silent (no logging)
     
-    def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_random_outlier_object(self) -> Tuple[torch.Tensor, torch.Tensor, str]:
         """
         Get a random object from the outlier dataset.
         
         Returns:
-            Tuple of (object_image, object_mask)
+            Tuple of (object_image, object_mask, category_name)
         """
         if self.outlier_dataset is None or len(self.outlier_dataset) == 0:
             # Return a dummy object if no outlier dataset is provided
             dummy_img = torch.zeros((3, 64, 64))
             dummy_mask = torch.ones((64, 64), dtype=torch.bool)
-            return dummy_img, dummy_mask
+            return dummy_img, dummy_mask, "unknown"
             
         idx = random.randint(0, len(self.outlier_dataset) - 1)
         return self.outlier_dataset[idx]
@@ -193,9 +175,11 @@ class OutlierExposureTransform(nn.Module):
         obj_mask: torch.Tensor,
         position: Tuple[int, int],
         scale: float,
-    ) -> Tuple[torch.Tensor, Dict[str, Any], torch.Tensor]:
+        category_name: str,
+    ) -> Tuple[torch.Tensor, Dict[str, Any], torch.Tensor, bool]:
         """
         Paste an object onto the image at the given position.
+        Implements hybrid strategy: ID augmentation (mappable) vs OOD augmentation (non-mappable).
         
         Args:
             img: Input image tensor
@@ -204,9 +188,10 @@ class OutlierExposureTransform(nn.Module):
             obj_mask: Object mask
             position: (x, y) position to paste
             scale: Scale factor for the object
+            category_name: COCO category name (e.g., "person", "car", "chair")
             
         Returns:
-            Modified image, target, and binary paste_mask (H, W) indicating where object was pasted
+            Modified image, target, binary paste_mask (H, W), and success flag (False if skipped due to overlap)
         """
         h, w = img.shape[-2:]
         obj_h, obj_w = obj_img.shape[-2:]
@@ -232,9 +217,30 @@ class OutlierExposureTransform(nn.Module):
             x, y = position
             x = max(0, min(x, w - new_w))
             y = max(0, min(y, h - new_h))
+            x_end = x + new_w
+            y_end = y + new_h
             
-            # Clone image for modification
+            # OVERLAP POLICY: Check overlap with existing GT before pasting
+            if "semseg" in target:
+                semseg = target["semseg"]  # [H, W] LongTensor
+                # Get object region in full image coordinates
+                obj_region_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
+                obj_region_mask[y:y_end, x:x_end] = obj_mask_resized
+                
+                # Check overlap with existing valid GT (semseg != 255)
+                existing_gt = (semseg != 255)
+                overlap = obj_region_mask & existing_gt
+                overlap_ratio = overlap.sum().float() / max(1, obj_region_mask.sum().float())
+                
+                # Skip if overlap exceeds threshold (to avoid corrupting labels)
+                if overlap_ratio > self.max_overlap_ratio:
+                    return img, target, paste_mask, False  # Skip this object
+            
+            # Clone image and target for modification
             img_clone = img.clone()
+            target = target.copy()  # Shallow copy to avoid modifying original
+            if "semseg" in target:
+                target["semseg"] = target["semseg"].clone()
             
             # Task 4: Light feathering only (kernel 3-5) - removed color matching, occlusion, shadow
             # Feathered alpha blending: apply light Gaussian blur to mask edges
@@ -255,24 +261,36 @@ class OutlierExposureTransform(nn.Module):
             mask_blurred = mask_blurred.squeeze(0).squeeze(0)  # [H, W]
             
             # Simple alpha blending with feathered mask (no color matching, no shadow, no occlusion)
-            bg_patch = img_clone[:, y:y+new_h, x:x+new_w]  # [3, H, W]
+            bg_patch = img_clone[:, y:y_end, x:x_end]  # [3, H, W]
             for c in range(3):
                 blended = (
                     self.blend_alpha * obj_img_resized[c] * mask_blurred + 
                     (1 - self.blend_alpha * mask_blurred) * bg_patch[c]
                 )
-                img_clone[c, y:y+new_h, x:x+new_w] = blended
+                img_clone[c, y:y_end, x:x_end] = blended
             
-            # Task 1: Save binary paste_mask (use original obj_mask_resized without feathering for precise mask)
-            paste_mask[y:y+new_h, x:x+new_w] = paste_mask[y:y+new_h, x:x+new_w] | obj_mask_resized
+            # HYBRID STRATEGY: ID augmentation vs OOD augmentation
+            # Check if category is mappable to Cityscapes
+            if category_name in COCO_TO_CS_TRAINID:
+                # ID AUGMENTATION: Mappable category → supervised paste
+                cs_trainid = COCO_TO_CS_TRAINID[category_name]
+                if "semseg" in target:
+                    # Update semseg with Cityscapes trainId (not IGNORE)
+                    target["semseg"][y:y_end, x:x_end][obj_mask_resized] = cs_trainid
+                # ood_mask stays 0 (not set to 1)
+            else:
+                # OOD AUGMENTATION: Non-mappable category → outlier exposure
+                if "semseg" in target:
+                    # Set semseg to IGNORE (255) under object
+                    target["semseg"][y:y_end, x:x_end][obj_mask_resized] = 255
+                # ood_mask will be set to 1 in forward() based on paste_mask
             
-            # For Outlier Exposure: paste object visually but DON'T add to targets
-            # The model should learn to predict "no object" for these regions naturally
-            # This is the standard approach for OE in anomaly segmentation
+            # Save binary paste_mask (use original obj_mask_resized without feathering for precise mask)
+            paste_mask[y:y_end, x:x_end] = paste_mask[y:y_end, x:x_end] | obj_mask_resized
             
-            return img_clone, target, paste_mask
+            return img_clone, target, paste_mask, True  # Success
         
-        return img, target, paste_mask
+        return img, target, paste_mask, False  # Failed (invalid size)
     
     def forward(
         self,
@@ -294,7 +312,13 @@ class OutlierExposureTransform(nn.Module):
         # Initialize ood_mask: 0 = ID, 1 = OOD, 255 = ignore (opzionale)
         ood_mask = torch.zeros((h, w), dtype=torch.uint8, device=img.device)
         
-        if random.random() > self.paste_probability:
+        # HYBRID STRATEGY: Separate probabilities for ID paste (mappable) vs OOD paste (non-mappable)
+        rand_id = random.random()
+        rand_ood = random.random()
+        do_id_paste = rand_id < self.p_id_paste
+        do_ood_paste = rand_ood < self.p_ood_paste
+        
+        if not (do_id_paste or do_ood_paste):
             # No paste: all pixels are ID (0)
             target["ood_mask"] = ood_mask
             return img, target
@@ -347,10 +371,49 @@ class OutlierExposureTransform(nn.Module):
             
             img_original = img.clone()  # Keep original image for resample
             
-            for _ in range(num_objects):
-                # Get random outlier object
-                obj_img, obj_mask = self._get_random_outlier_object()
+            for obj_idx in range(num_objects):
+                # Decide paste type for this object (ID or OOD)
+                # If both are enabled, alternate or use probability
+                if do_id_paste and do_ood_paste:
+                    # Alternate or random: 50% ID, 50% OOD
+                    is_id_paste = (obj_idx % 2 == 0) if random.random() < 0.5 else random.random() < 0.5
+                elif do_id_paste:
+                    is_id_paste = True
+                elif do_ood_paste:
+                    is_id_paste = False
+                else:
+                    continue  # Should not happen, but safety check
+                
+                # Get random outlier object (with category_name)
+                obj_img, obj_mask, category_name = self._get_random_outlier_object()
                 obj_h_orig, obj_w_orig = obj_img.shape[-2:]
+                
+                # For ID paste: only use mappable categories
+                # For OOD paste: only use non-mappable categories
+                if is_id_paste:
+                    if category_name not in COCO_TO_CS_TRAINID:
+                        # Skip: this category is not mappable, try another object
+                        max_retries = 10
+                        retry_count = 0
+                        while retry_count < max_retries:
+                            obj_img, obj_mask, category_name = self._get_random_outlier_object()
+                            if category_name in COCO_TO_CS_TRAINID:
+                                break
+                            retry_count += 1
+                        if retry_count >= max_retries:
+                            continue  # Skip this object if no mappable category found
+                else:
+                    if category_name in COCO_TO_CS_TRAINID:
+                        # Skip: this category is mappable, try another object
+                        max_retries = 10
+                        retry_count = 0
+                        while retry_count < max_retries:
+                            obj_img, obj_mask, category_name = self._get_random_outlier_object()
+                            if category_name not in COCO_TO_CS_TRAINID:
+                                break
+                            retry_count += 1
+                        if retry_count >= max_retries:
+                            continue  # Skip this object if no non-mappable category found
                 
                 # Select base scale using weighted distribution if enabled, otherwise uniform
                 if self.use_weighted_scale:
@@ -433,20 +496,29 @@ class OutlierExposureTransform(nn.Module):
                         continue  # Skip this object if no valid position
                     self.random_placement_count += 1
                 
-                # Paste object and get paste_mask
-                img, target, paste_mask = self._paste_object(
-                    img, target, obj_img, obj_mask, (x, y), scale
+                # Paste object and get paste_mask (with category_name for ID/OOD distinction)
+                img, target, paste_mask, success = self._paste_object(
+                    img, target, obj_img, obj_mask, (x, y), scale, category_name
                 )
+                
+                # Skip if paste failed (e.g., overlap too high)
+                if not success:
+                    continue
                 
                 # LOG 2: Debug logging for first 2 batches only (silent after)
                 if self._dbg_count < self._dbg_max_count:
                     ood_ratio_obj = paste_mask.float().mean().item() if paste_mask.numel() > 0 else 0.0
                     y_norm = float(y) / max(1.0, float(h - 1))
-                    print(f"[OE Debug {self._dbg_count}] y={y} (norm={y_norm:.3f}), base_scale={base_scale:.4f}, final_scale={scale:.4f}, obj_h={obj_h_scaled}, obj_w={obj_w_scaled}, ood_ratio={ood_ratio_obj:.6f}")
+                    paste_type = "ID" if category_name in COCO_TO_CS_TRAINID else "OOD"
+                    print(f"[OE Debug {self._dbg_count}] {paste_type} paste: cat={category_name}, y={y} (norm={y_norm:.3f}), base_scale={base_scale:.4f}, final_scale={scale:.4f}, obj_h={obj_h_scaled}, obj_w={obj_w_scaled}, ood_ratio={ood_ratio_obj:.6f}")
                     self._dbg_count += 1
                 
-                # Accumulate paste_mask
-                cumulative_paste_mask = cumulative_paste_mask | paste_mask
+                # Accumulate paste_mask (only for OOD, ID paste doesn't set ood_mask)
+                # For OOD paste: paste_mask indicates OOD pixels
+                # For ID paste: paste_mask is still tracked but ood_mask stays 0
+                if category_name not in COCO_TO_CS_TRAINID:
+                    # Only accumulate OOD paste_mask
+                    cumulative_paste_mask = cumulative_paste_mask | paste_mask
             
             # FIX 4: Check ood_ratio and min object size after all objects pasted
             ood_ratio = cumulative_paste_mask.float().mean().item()
@@ -476,22 +548,15 @@ class OutlierExposureTransform(nn.Module):
                     img = img_original
                 # After max attempts, accept silently (no logging)
         
-        # Task 1: Build ood_mask: 1 = OOD (pasted), 0 = ID (rest)
+        # Task 1: Build ood_mask: 1 = OOD (non-mappable pasted), 0 = ID (rest)
+        # Note: ID paste (mappable) does NOT set ood_mask to 1 (it stays 0)
+        # Only OOD paste (non-mappable) sets ood_mask to 1
         ood_mask = cumulative_paste_mask.to(torch.uint8)  # 1 = OOD, 0 = ID
         
-        # P0 Fix: NON modificare target["masks"] dentro Outlier Exposure
-        # Problema: pm è alla risoluzione finale (es. 1024x1024) ma target["masks"]
-        # può essere ancora alla risoluzione originale (es. 1552x2079), causando mismatch.
-        # OE non deve toccare le GT masks - il conflitto OOD vs GT può essere gestito
-        # nella loss settando i pixel OOD come ignore (255) in semseg.
-        
-        # Set IGNORE (255) per pixel OOD in semseg
-        IGNORE = 255
-        if "semseg" in target:
-            target["semseg"] = target["semseg"].clone()
-            target["semseg"][ood_mask == 1] = IGNORE
-        else:
-            raise RuntimeError("target['semseg'] missing: create it in target_parser.")
+        # Note: semseg is already updated in _paste_object:
+        # - ID paste: semseg set to Cityscapes trainId (not 255) in _paste_object
+        # - OOD paste: semseg set to 255 (IGNORE) in _paste_object
+        # No need to set IGNORE again here
         
         # Add ood_mask to target
         target["ood_mask"] = ood_mask
@@ -776,7 +841,6 @@ class COCOOutlierDataset:
         min_area: int = 1000,
         max_area: Optional[int] = None,
         use_zip: bool = False,
-        allowed_category_ids: Optional[list[int]] = None,
     ):
         """
         Args:
@@ -785,7 +849,6 @@ class COCOOutlierDataset:
             min_area: Minimum object area in pixels (filters small objects)
             max_area: Maximum object area in pixels (filters very large objects)
             use_zip: If True, load from zip files instead of directories
-            allowed_category_ids: Whitelist of COCO category IDs to include (None = all categories)
         """
         if not COCO_AVAILABLE:
             raise ImportError(
@@ -798,7 +861,6 @@ class COCOOutlierDataset:
         self.min_area = min_area
         self.max_area = max_area
         self.use_zip = use_zip
-        self.allowed_category_ids = set(allowed_category_ids) if allowed_category_ids is not None else None
         
         # Load COCO annotations
         if use_zip:
@@ -894,11 +956,7 @@ class COCOOutlierDataset:
                 if self.max_area is not None and area > self.max_area:
                     continue
                 
-                # Whitelist filter: only allow specified categories
-                if self.allowed_category_ids is not None and category_id not in self.allowed_category_ids:
-                    continue
-                
-                # Store object info
+                # Store object info (all categories allowed - hybrid strategy uses mapping)
                 self.valid_objects.append({
                     'img_id': img_id,
                     'ann_id': ann['id'],
@@ -966,18 +1024,24 @@ class COCOOutlierDataset:
     def __len__(self):
         return len(self.valid_objects)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
         """
         Load a COCO object.
         
         Returns:
             img_tensor: Object image tensor (3, H, W) in range [0, 1]
             mask_tensor: Object mask tensor (H, W) of type bool
+            category_name: COCO category name (e.g., "person", "car", "chair")
         """
         obj_info = self.valid_objects[idx]
         img_info = obj_info['img_info']
         ann = obj_info['ann']
         bbox = obj_info['bbox']
+        
+        # Get category name
+        category_id = ann['category_id']
+        cats = self.coco.loadCats([category_id])
+        category_name = cats[0]['name'] if cats else "unknown"
         
         # Load full image
         img_array = self._load_image(img_info)
@@ -1018,7 +1082,7 @@ class COCOOutlierDataset:
                 else:
                     return self.__getitem__(0)
             
-            return img_tensor, mask_tensor
+            return img_tensor, mask_tensor, category_name
         else:
             # Invalid bbox, try next object
             if idx + 1 < len(self.valid_objects):

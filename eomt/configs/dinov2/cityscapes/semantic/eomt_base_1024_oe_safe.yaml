@@ -110,7 +110,7 @@ data:
     scale_range: [0.5, 2.0]
     check_empty_targets: true
     
-    # ===== CONFIGURAZIONE COCO OUTLIER EXPOSURE =====
+    # ===== CONFIGURAZIONE COCO OUTLIER EXPOSURE (HYBRID STRATEGY) =====
     # Path alla directory che contiene i file zip COCO (adatta il path)
     coco_path: "/path/to/coco2017_zips"
     
@@ -120,45 +120,15 @@ data:
     # IMPORTANTE: true perché hai i file in formato zip
     use_coco_zip: true
     
-    # WHITELIST: solo indoor + sport + appliances (esclude person/vehicles)
-    # Categorie: indoor furniture/electronics, sport equipment, appliances
-    coco_allowed_category_ids:
-      - 37  # sports ball
-      - 38  # kite
-      - 39  # baseball bat
-      - 40  # baseball glove
-      - 41  # skateboard
-      - 42  # surfboard
-      - 43  # tennis racket
-      - 44  # frisbee
-      - 45  # skis
-      - 46  # snowboard
-      - 62  # chair
-      - 63  # couch
-      - 65  # bed
-      - 67  # dining table
-      - 70  # toilet
-      - 72  # tv
-      - 73  # laptop
-      - 74  # mouse
-      - 75  # remote
-      - 76  # keyboard
-      - 77  # cell phone
-      - 78  # microwave
-      - 79  # oven
-      - 80  # toaster
-      - 81  # sink
-      - 82  # refrigerator
-      - 84  # book
-      - 85  # clock
-      - 86  # vase
-      - 87  # scissors
-      - 88  # teddy bear
-      - 89  # hair drier
-      - 90  # toothbrush
+    # HYBRID STRATEGY: Probabilità separate per ID paste (mappabile) vs OOD paste (non-mappabile)
+    # ID paste: categorie COCO mappabili a Cityscapes (person, car, bicycle, etc.) → supervised augmentation
+    # OOD paste: categorie COCO non mappabili (chair, laptop, etc.) → outlier exposure
+    p_id_paste: 0.10    # 10% batch ha ID paste (range 0.05-0.15, conservativo per non distruggere Cityscapes)
+    p_ood_paste: 0.30   # 30% batch ha OOD paste (range 0.20-0.35, curriculum learning)
+    max_overlap_ratio: 0.02  # Max overlap con GT esistente (2% per evitare corruzione labels)
     
-    # P1 - Parametri OE conservativi per non distruggere ID
-    paste_probability: 0.30    # 30% batch ha outliers (range 0.25-0.4, conservativo)
+    # DEPRECATED: paste_probability (mantenuto per backward compatibility, non usato)
+    paste_probability: 0.30
     min_objects: 1              # Min oggetti da incollare per immagine
     max_objects: 2              # Max 2 oggetti (ridotto per stabilità)
     min_scale: 0.22             # Oggetti più grandi (22% immagine)
