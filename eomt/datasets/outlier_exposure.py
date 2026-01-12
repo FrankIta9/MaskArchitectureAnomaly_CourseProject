@@ -703,15 +703,15 @@ class OutlierExposureTransform(nn.Module):
                     self._skipped_no_position += 1
                 continue  # Skip this object if no valid position
             self.random_placement_count += 1
-                
-                # Paste object and get paste_mask (with category_name for ID/OOD distinction)
-                img, target, paste_mask, success = self._paste_object(
-                    img, target, obj_img, obj_mask, (x, y), scale, category_name
-                )
-                
-                # Skip if paste failed (e.g., overlap too high)
-                if not success:
-                    continue
+            
+            # Paste object and get paste_mask (with category_name for ID/OOD distinction)
+            img, target, paste_mask, success = self._paste_object(
+                img, target, obj_img, obj_mask, (x, y), scale, category_name
+            )
+            
+            # Skip if paste failed (e.g., overlap too high)
+            if not success:
+                continue
                 
                 # LOG 2: Debug logging for first 2 batches only (silent after)
                 if self._dbg_count < self._dbg_max_count:
