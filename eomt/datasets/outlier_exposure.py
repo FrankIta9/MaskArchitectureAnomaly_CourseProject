@@ -9,6 +9,7 @@ import torch.nn as nn
 from torchvision.tv_tensors import Image, Mask
 from typing import Optional, Dict, Any, Tuple
 import random
+import math
 import numpy as np
 from PIL import Image as PILImage
 import torchvision.transforms.v2.functional as F
@@ -77,6 +78,17 @@ class OutlierExposureTransform(nn.Module):
         paste_y_range: Tuple[float, float] = (0.65, 0.98),  # (min_ratio, max_ratio) of image height
         # Min object size in pixels (to reduce resample attempts)
         min_obj_size_px: int = 30,  # Minimum object size in pixels (width or height)
+        # Placement constraints (ground-only / no-sky-no-building)
+        allowed_trainids: Optional[list[int]] = None,
+        min_allowed_fraction: float = 0.7,
+        # Acceptance constraints
+        min_write_pixels: int = 4000,
+        ood_ratio_min: float = 0.0,
+        ood_ratio_max: float = 0.25,
+        # Optional: target OOD area ratio sampling (more stable than scale)
+        use_target_area_ratio: bool = False,
+        ood_area_ratio_ranges: Optional[list[list[float]]] = None,
+        ood_area_ratio_weights: Optional[list[float]] = None,
     ):
         """
         Args:
@@ -137,7 +149,29 @@ class OutlierExposureTransform(nn.Module):
         
         # P0 Fix: Y position range for paste (biased towards bottom = on-road)
         self.paste_y_range = paste_y_range
-        
+
+        # Placement constraints (optional)
+        self.allowed_trainids = allowed_trainids
+        self.min_allowed_fraction = float(min_allowed_fraction)
+
+        # Acceptance constraints
+        self.min_write_pixels = int(min_write_pixels)
+        self.ood_ratio_min = float(ood_ratio_min)
+        self.ood_ratio_max = float(ood_ratio_max)
+
+        # Optional: target OOD area ratio sampling (more stable than raw scale)
+        self.use_target_area_ratio = bool(use_target_area_ratio)
+        self.ood_area_ratio_ranges = ood_area_ratio_ranges
+        self.ood_area_ratio_weights = ood_area_ratio_weights
+
+        if self.use_target_area_ratio:
+            if not self.ood_area_ratio_ranges or not self.ood_area_ratio_weights:
+                raise ValueError("ood_area_ratio_ranges and ood_area_ratio_weights must be provided when use_target_area_ratio=True")
+            if len(self.ood_area_ratio_ranges) != len(self.ood_area_ratio_weights):
+                raise ValueError("ood_area_ratio_ranges and ood_area_ratio_weights must have the same length")
+            if abs(sum(self.ood_area_ratio_weights) - 1.0) > 1e-6:
+                raise ValueError(f"ood_area_ratio_weights must sum to 1.0 (current sum: {sum(self.ood_area_ratio_weights)})")
+
         # Min object size in pixels (to reduce resample attempts)
         self.min_obj_size_px = min_obj_size_px
         
@@ -178,7 +212,96 @@ class OutlierExposureTransform(nn.Module):
             
         idx = random.randint(0, len(self.outlier_dataset) - 1)
         return self.outlier_dataset[idx]
-    
+
+    def _sample_ood_area_ratio(self) -> float:
+        if not self.use_target_area_ratio or not self.ood_area_ratio_ranges or not self.ood_area_ratio_weights:
+            return 0.0
+
+        selected_range_idx = random.choices(
+            range(len(self.ood_area_ratio_ranges)),
+            weights=self.ood_area_ratio_weights,
+            k=1,
+        )[0]
+        r_min, r_max = self.ood_area_ratio_ranges[selected_range_idx]
+        return float(random.uniform(float(r_min), float(r_max)))
+
+    def _scale_for_target_area_ratio(
+        self,
+        obj_mask: torch.Tensor,
+        target_area_ratio: float,
+        h: int,
+        w: int,
+    ) -> float:
+        obj_area = float(obj_mask.sum().item())
+        if obj_area <= 0.0:
+            return 0.0
+        desired_area = float(target_area_ratio) * float(h * w)
+        if desired_area <= 0.0:
+            return 0.0
+        # scale ~ sqrt(desired_area / obj_area)
+        return float(math.sqrt(desired_area / obj_area))
+
+    def _build_allowed_mask(self, target: Dict[str, Any], h: int, w: int) -> Optional[torch.Tensor]:
+        """Mask of pixels where OOD placement is allowed."""
+        if self.allowed_trainids is None:
+            return None
+        if "semseg" not in target:
+            return None
+
+        semseg = target["semseg"]
+        if semseg.shape != (h, w):
+            return None
+
+        allowed = torch.zeros((h, w), dtype=torch.bool, device=semseg.device)
+        for tid in self.allowed_trainids:
+            allowed |= (semseg == int(tid))
+
+        if "valid_mask" in target and torch.is_tensor(target["valid_mask"]) and target["valid_mask"].shape == (h, w):
+            allowed &= target["valid_mask"].to(torch.bool)
+
+        y_min_ratio, y_max_ratio = self.paste_y_range
+        y_min = int(float(y_min_ratio) * h)
+        y_max = int(float(y_max_ratio) * h)
+        y_min = max(0, min(y_min, h - 1))
+        y_max = max(0, min(y_max, h - 1))
+        if y_min > 0:
+            allowed[:y_min, :] = False
+        if y_max < h - 1:
+            allowed[y_max + 1 :, :] = False
+
+        return allowed if allowed.any() else None
+
+    def _sample_position_from_mask(
+        self,
+        allowed_mask: torch.Tensor,
+        obj_h: int,
+        obj_w: int,
+        min_allowed_fraction: float,
+    ) -> Optional[Tuple[int, int]]:
+        """Sample top-left (x,y) where patch has enough allowed pixels."""
+        h, w = allowed_mask.shape
+        obj_h = max(1, min(int(obj_h), h))
+        obj_w = max(1, min(int(obj_w), w))
+        out_h = h - obj_h + 1
+        out_w = w - obj_w + 1
+        if out_h <= 0 or out_w <= 0:
+            return None
+
+        # integral image over allowed_mask
+        a = allowed_mask.to(torch.int32)
+        s = torch.zeros((h + 1, w + 1), dtype=torch.int32, device=allowed_mask.device)
+        s[1:, 1:] = torch.cumsum(torch.cumsum(a, dim=0), dim=1)
+
+        sum_map = s[obj_h:, obj_w:] - s[:-obj_h, obj_w:] - s[obj_h:, :-obj_w] + s[:-obj_h, :-obj_w]
+        threshold = int(math.ceil(float(min_allowed_fraction) * float(obj_h * obj_w)))
+        candidates = (sum_map >= threshold).nonzero(as_tuple=False)
+        if candidates.numel() == 0:
+            return None
+
+        idx = random.randint(0, candidates.shape[0] - 1)
+        y, x = candidates[idx].tolist()
+        return (int(x), int(y))
+
     def _paste_object(
         self,
         img: torch.Tensor,
@@ -344,9 +467,16 @@ class OutlierExposureTransform(nn.Module):
                 semseg_patch = target["semseg"][y:y_end, x:x_end]
                 semseg255_sum = (semseg_patch == 255).sum().item()
             
-            write_sum = write_mask.sum().item()
+            write_sum = int(write_mask.sum().item())
             skip_reason = None
-            
+
+            # Treat extremely small effective writes as failure (prevents "pasted" but useless OOD)
+            if category_name not in COCO_TO_CS_TRAINID and write_sum > 0 and self.min_write_pixels > 0 and write_sum < self.min_write_pixels:
+                if self._log_reality_check:
+                    self._skipped_too_small = getattr(self, '_skipped_too_small', 0) + 1
+                skip_reason = "too_small"
+                return img, target, paste_mask, False
+
             # Diagnosi "a martello": log dettagliato quando paste_mask è vuota
             if write_sum == 0:
                 if self._log_reality_check:
@@ -378,28 +508,31 @@ class OutlierExposureTransform(nn.Module):
                 
                 return img, target, paste_mask, False  # Skip oggetto (non ha scritto niente)
             
-            # Overlap policy: check overlap with existing GT (solo per OOD, ID può sovrascrivere)
+            # Overlap policy (OOD only): avoid overwriting Cityscapes "thing" instances.
+            # Overlap with stuff (road/vegetation/terrain) is allowed because we mark OOD pixels as IGNORE.
             if category_name not in COCO_TO_CS_TRAINID and "semseg" in target:
-                # Extract patch per overlap check
                 semseg_patch = target["semseg"][y:y_end, x:x_end]  # [H_patch, W_patch]
-                existing_gt = (semseg_patch != 255)
-                overlap = write_mask & existing_gt
+                thing_ids = (11, 12, 13, 14, 15, 16, 17, 18)
+                existing_thing = torch.zeros_like(semseg_patch, dtype=torch.bool)
+                for tid in thing_ids:
+                    existing_thing |= (semseg_patch == tid)
+
+                overlap = write_mask & existing_thing
                 overlap_ratio = overlap.sum().float() / max(1, write_mask.sum().float())
-                
+
                 if overlap_ratio > self.max_overlap_ratio:
                     if self._log_reality_check:
                         self._skipped_overlap += 1
                     skip_reason = "overlap"
-                    
-                    # Paste trace: log anche per skip
+
                     if self._paste_trace_enabled:
                         import logging
                         logging.info(
                             f"🔍 Paste Trace (SKIP) - obj_mask_sum={obj_mask_sum}, vm_sum={vm_sum}, "
                             f"semseg255_sum={semseg255_sum}, write_sum={write_sum}, skip_reason={skip_reason}"
                         )
-                    
-                    return img, target, paste_mask, False  # Skip oggetto (overlap troppo alto)
+
+                    return img, target, paste_mask, False
             
             # Keep semseg/masks consistent with the paste
             if "semseg" in target:
@@ -547,8 +680,10 @@ class OutlierExposureTransform(nn.Module):
             target["ood_mask"] = ood_mask
             return img, target
         
-        # FIX 4: Hard-min size check with resample (max 10 attempts)
-        OOD_RATIO_MIN = 0.002
+        # Resample policy
+        OOD_RATIO_MIN = float(self.ood_ratio_min)
+        OOD_RATIO_MAX = float(self.ood_ratio_max)
+        MIN_OOD_PIXELS = max(int(self.min_write_pixels), int(self.min_obj_size_px) ** 2)
         MAX_RESAMPLE = 10
         
         num_objects = random.randint(self.min_objects, self.max_objects)
@@ -556,10 +691,18 @@ class OutlierExposureTransform(nn.Module):
         # Get drivable mask once for all objects
         drivable_mask = self._get_drivable_mask(target, h, w)
         
-        # Fix: Escludi pixel padding/letterbox e imponi y >= 0.7H
-        # Questo evita OOD "nel vuoto" nero e oggetti "in cielo"
-        y_min = int(0.7 * h)
-        
+        # Placement Y band (avoid sky / top area)
+        y_min_ratio, y_max_ratio = self.paste_y_range
+        y_min = int(float(y_min_ratio) * h)
+        y_max = int(float(y_max_ratio) * h)
+        y_min = max(0, min(y_min, h - 1))
+        y_max = max(0, min(y_max, h - 1))
+
+        allowed_mask = self._build_allowed_mask(target, h, w)
+        # If explicit allowed mask is provided, prefer it over drivable placement.
+        if allowed_mask is not None:
+            drivable_mask = None
+
         if drivable_mask is not None:
             # valid area: preferisci target["valid_mask"] se c'è
             if "valid_mask" in target:
@@ -577,8 +720,11 @@ class OutlierExposureTransform(nn.Module):
 
                 drivable_mask = drivable_mask & valid_area
 
-            # NEW: bottom constraint - y >= 0.7H
-            drivable_mask[:y_min, :] = False
+            # Apply Y band constraint
+            if y_min > 0:
+                drivable_mask[:y_min, :] = False
+            if y_max < h - 1:
+                drivable_mask[y_max + 1 :, :] = False
 
             if not drivable_mask.any():
                 drivable_mask = None  # Nessuna posizione valida
@@ -644,15 +790,27 @@ class OutlierExposureTransform(nn.Module):
 
                 obj_h_orig, obj_w_orig = obj_img.shape[-2:]
 
-                base_scale = self._sample_weighted_scale() if self.use_weighted_scale else random.uniform(self.min_scale, self.max_scale)
+                # Choose scale
+                if (not is_id_paste) and self.use_target_area_ratio:
+                    target_ratio = self._sample_ood_area_ratio()
+                    base_scale = self._scale_for_target_area_ratio(obj_mask, target_ratio, h, w)
+                    if base_scale <= 0.0:
+                        if self._log_reality_check:
+                            self._skipped_too_small = getattr(self, '_skipped_too_small', 0) + 1
+                        continue
+                else:
+                    base_scale = self._sample_weighted_scale() if self.use_weighted_scale else random.uniform(self.min_scale, self.max_scale)
 
                 # Estimated size (used for placement constraints)
                 obj_h_est = min(max(1, int(obj_h_orig * base_scale)), h)
                 obj_w_est = min(max(1, int(obj_w_orig * base_scale)), w)
 
-                # Pick a position (prefer drivable), then compute final scale using y
+                # Pick a position where the object patch fits into allowed/valid region
                 position = None
-                if drivable_mask is not None and drivable_mask.any():
+                if allowed_mask is not None:
+                    position = self._sample_position_from_mask(allowed_mask, obj_h_est, obj_w_est, self.min_allowed_fraction)
+
+                if position is None and drivable_mask is not None and drivable_mask.any():
                     position = self._sample_drivable_position(drivable_mask, obj_h_est, obj_w_est, h, w)
                     if position is not None:
                         self.drivable_placement_count += 1
@@ -667,11 +825,24 @@ class OutlierExposureTransform(nn.Module):
                     self.random_placement_count += 1
 
                 x, y = position
-                scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
+
+                # Final scale (optionally perspective-aware)
+                scale = base_scale
+                if self.use_perspective_aware:
+                    scale = self._apply_perspective_aware_scale(base_scale, y, h)
+
+                # Hard clamp to fit the image
+                max_fit_scale = min(float(h) / max(1.0, float(obj_h_orig)), float(w) / max(1.0, float(obj_w_orig)))
+                scale = max(1e-3, min(float(scale), float(max_fit_scale)))
 
                 obj_h_scaled = min(max(1, int(obj_h_orig * scale)), h)
                 obj_w_scaled = min(max(1, int(obj_w_orig * scale)), w)
+
+                # If we have an allowed mask, re-sample a position for the final size (prevents write_sum==0)
+                if allowed_mask is not None:
+                    position2 = self._sample_position_from_mask(allowed_mask, obj_h_scaled, obj_w_scaled, self.min_allowed_fraction)
+                    if position2 is not None:
+                        x, y = position2
 
                 # Clamp to ensure it fits
                 x = min(max(0, x), max(0, w - obj_w_scaled))
@@ -702,14 +873,15 @@ class OutlierExposureTransform(nn.Module):
                     if self._log_reality_check:
                         self._pasted_ood += 1
 
-            # Check ood_ratio and min object size after pasting
+            # Check OOD size after pasting
             ood_ratio = cumulative_paste_mask.float().mean().item()
             ood_pixels = int(cumulative_paste_mask.sum().item())
-            min_obj_size_ok = ood_pixels >= (self.min_obj_size_px ** 2)
 
-            OOD_RATIO_MAX = 0.03
+            min_pixels_ok = ood_pixels >= MIN_OOD_PIXELS
+            too_big = (OOD_RATIO_MAX > 0.0) and (ood_ratio > OOD_RATIO_MAX)
+            too_small = (OOD_RATIO_MIN > 0.0) and (ood_ratio < OOD_RATIO_MIN)
 
-            need_resample = (ood_ratio > OOD_RATIO_MAX) or (ood_ratio < OOD_RATIO_MIN) or (not min_obj_size_ok)
+            need_resample = too_big or (not min_pixels_ok) or too_small
             if need_resample and resample_attempt < MAX_RESAMPLE - 1:
                 continue
 

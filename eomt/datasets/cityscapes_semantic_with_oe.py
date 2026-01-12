@@ -60,6 +60,17 @@ class CityscapesSemanticWithOE(LightningDataModule):
         paste_y_range: Tuple[float, float] = (0.65, 0.98),
         blend_alpha: float = 1.0,  # 1.0 = dry paste (more stable), 0.8 for blending
         min_obj_size_px: int = 30,  # Minimum object size in pixels (to reduce resample)
+        # Placement constraints (ground-only)
+        allowed_trainids: Optional[list[int]] = None,
+        min_allowed_fraction: float = 0.7,
+        # Acceptance constraints
+        min_write_pixels: int = 4000,
+        ood_ratio_min: float = 0.0,
+        ood_ratio_max: float = 0.25,
+        # Optional: target OOD area ratio sampling
+        use_target_area_ratio: bool = False,
+        ood_area_ratio_ranges: Optional[list] = None,
+        ood_area_ratio_weights: Optional[list] = None,
     ) -> None:
         """
         Args:
@@ -127,6 +138,14 @@ class CityscapesSemanticWithOE(LightningDataModule):
                     paste_y_range=paste_y_range,
                     blend_alpha=blend_alpha,
                     min_obj_size_px=min_obj_size_px,
+                    allowed_trainids=allowed_trainids,
+                    min_allowed_fraction=min_allowed_fraction,
+                    min_write_pixels=min_write_pixels,
+                    ood_ratio_min=ood_ratio_min,
+                    ood_ratio_max=ood_ratio_max,
+                    use_target_area_ratio=use_target_area_ratio,
+                    ood_area_ratio_ranges=ood_area_ratio_ranges,
+                    ood_area_ratio_weights=ood_area_ratio_weights,
                 )
                 print(f"Outlier Exposure enabled with {len(coco_dataset)} COCO objects")
             except Exception as e:

@@ -136,15 +136,35 @@ data:
     max_scale: 0.40             # Oggetti più grandi (40% immagine)
     coco_min_area: 3000         # Solo oggetti ben definiti e visibili
     
-    # P0 Fix: Y position range e blending (Fishyscapes-like)
-    paste_y_range: [0.70, 0.98]  # Bias verso bottom (on-road proxy) - più aggressivo
+    # Placement constraints (ground-only): avoid sky/building, allow vegetation/terrain
+    # Cityscapes trainIds: road=0, sidewalk=1, vegetation=8, terrain=9
+    allowed_trainids: [0, 1, 8, 9]
+    min_allowed_fraction: 0.70
+
+    # P0 Fix: Y position range (avoid top of image)
+    # Wider than 0.70 to reduce failures when valid_mask is sparse after RandomCrop
+    paste_y_range: [0.30, 0.98]
+
+    # Perspective-aware scaling
     use_perspective_aware: true
-    perspective_strength: 1.0    # 100% strength per prospettiva (Fishyscapes-like)
-    min_obj_size_px: 35          # Min object size in pixels (30-40 range)
-    
-    # Drivable region constraints
-    use_drivable_regions: true
-    drivable_class_ids: [0, 1]  # Road=0, Sidewalk=1
-    
+    perspective_strength: 1.0
+
+    # Acceptance constraints
+    min_obj_size_px: 35
+    min_write_pixels: 4000
+    ood_ratio_min: 0.0
+    ood_ratio_max: 0.25  # supports up to ~20% OOD area with margin
+
+    # Optional: OOD target area sampling (more stable than scale for RO21 vs Fishyscapes)
+    use_target_area_ratio: true
+    ood_area_ratio_ranges:
+      - [0.05, 0.10]  # medium (Fishyscapes-like)
+      - [0.12, 0.20]  # large (RoadObstacle21-like)
+    ood_area_ratio_weights: [0.60, 0.40]
+
+    # Drivable region constraints disabled (replaced by allowed_trainids)
+    use_drivable_regions: false
+    drivable_class_ids: [0, 1]
+
     # Blending
     blend_alpha: 1.0             # 1.0 = dry paste (più stabile)
