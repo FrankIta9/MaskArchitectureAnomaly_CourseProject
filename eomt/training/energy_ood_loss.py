@@ -76,7 +76,7 @@ class EnergyOODLoss(nn.Module):
     
     def compute_energy_from_pixel_logits(self, pixel_logits: torch.Tensor) -> torch.Tensor:
         """
-        Compute energy score from per-pixel semantic logits.
+        Compute energy score from per-pixel semantic logits (DEPRECATED - use compute_energy_from_pixel_scores).
         
         Energy: E(x) = -T * log(sum(exp(logits / T)))
         
@@ -115,6 +115,65 @@ class EnergyOODLoss(nn.Module):
         # Convert back to original dtype if needed
         if pixel_logits.dtype != torch.float32:
             energy = energy.to(pixel_logits.dtype)
+        
+        # Ensure energy is real (not complex) - should always be true
+        if energy.is_complex():
+            energy = energy.real
+        
+        # Clamp energy to reasonable range (avoid NaN/Inf)
+        energy = torch.clamp(energy, min=-100.0, max=100.0)
+        
+        # Replace any remaining NaN/Inf with finite values
+        energy = torch.where(torch.isfinite(energy), energy, torch.full_like(energy, -25.0))
+        
+        # Final safety: ensure energy is real float, not complex
+        if not energy.dtype.is_floating_point:
+            energy = energy.float()
+        
+        return energy
+    
+    def compute_energy_from_pixel_scores(self, pixel_scores: torch.Tensor) -> torch.Tensor:
+        """
+        Compute energy score from per-pixel semantic scores (RAW logits, not probabilities).
+        
+        Energy: E(x) = -T * log(sum(exp(scores / T)))
+        
+        This version expects RAW logits (not probabilities from softmax), which is correct
+        for energy computation as per the standard energy-based OOD detection formula.
+        
+        Args:
+            pixel_scores: Per-pixel scores tensor [B, C, H, W] - RAW logits (not probabilities)
+            
+        Returns:
+            Energy scores [B, H, W]
+        """
+        # Safety check: ensure scores are real (not complex) and finite
+        if pixel_scores.is_complex():
+            pixel_scores = pixel_scores.real
+        
+        if not torch.isfinite(pixel_scores).all():
+            # If scores contain NaN/Inf, return safe default energy values
+            h, w = pixel_scores.shape[-2:]
+            return torch.full((pixel_scores.shape[0], h, w), -25.0, device=pixel_scores.device, dtype=pixel_scores.dtype)
+        
+        # Force float32 for energy/logsumexp computations (better numerical stability)
+        pixel_scores_f32 = pixel_scores.float() if pixel_scores.dtype != torch.float32 else pixel_scores
+        
+        # Scale by temperature and clamp for numerical stability
+        x = torch.clamp(pixel_scores_f32 / self.temperature, min=-50.0, max=50.0)  # [B, C, H, W]
+        
+        # Ensure scores are real and finite before logsumexp
+        if x.is_complex():
+            x = x.real
+        if not torch.isfinite(x).all():
+            x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
+        
+        # Compute energy: E = -T * logsumexp(scores / T) along class dimension
+        energy = -self.temperature * torch.logsumexp(x, dim=1)  # [B, H, W]
+        
+        # Convert back to original dtype if needed
+        if pixel_scores.dtype != torch.float32:
+            energy = energy.to(pixel_scores.dtype)
         
         # Ensure energy is real (not complex) - should always be true
         if energy.is_complex():
@@ -207,14 +266,14 @@ class EnergyOODLoss(nn.Module):
         Returns:
             Energy regularization loss
         """
-        # Task 6: Option A - Use per-pixel logits if available (preferred)
+        # Task 6: Option A - Use per-pixel scores (RAW logits) if available (preferred)
         if pixel_logits is not None and ood_mask is not None:
-            # Safety check: ensure logits are finite
+            # Safety check: ensure scores are finite
             if not torch.isfinite(pixel_logits).all():
                 return torch.tensor(0.0, device=pixel_logits.device, dtype=pixel_logits.dtype, requires_grad=True)
             
-            # Compute energy map from per-pixel logits
-            energy_map = self.compute_energy_from_pixel_logits(pixel_logits)  # [B, H, W]
+            # Compute energy map from per-pixel scores (RAW logits, not probabilities)
+            energy_map = self.compute_energy_from_pixel_scores(pixel_logits)  # [B, H, W]
             
             # Safety check: ensure energy is finite
             if not torch.isfinite(energy_map).all():

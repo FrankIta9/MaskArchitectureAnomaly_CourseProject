@@ -423,8 +423,9 @@ class LightningModule(lightning.LightningModule):
                 # Interpolate mask_logits to img_size (same as in eval_step)
                 mask_logits_interp = interpolate(mask_logits, self.img_size, mode="bilinear", align_corners=False)  # [B, Q, H, W]
                 
-                # Calculate pixel_logits = to_per_pixel_logits_semantic(mask_logits, class_logits)
-                pixel_logits = self.to_per_pixel_logits_semantic(mask_logits_interp, class_logits)  # [B, C, H, W]
+                # Calculate pixel_scores (RAW logits) for energy computation
+                # Use raw version (no softmax on class_logits) for correct energy formula
+                pixel_logits = self.to_per_pixel_scores_semantic_raw(mask_logits_interp, class_logits)  # [B, C, H, W] - RAW logits
                 
                 # Calculate energy_map = -T*logsumexp(pixel_logits/T)
                 # Use temperature T = 1.0 (same as energy loss)
@@ -1133,6 +1134,30 @@ class LightningModule(lightning.LightningModule):
             "bqhw, bqc -> bchw",
             mask_logits.sigmoid(),
             class_logits.softmax(dim=-1)[..., :-1],
+        )
+    
+    @staticmethod
+    def to_per_pixel_scores_semantic_raw(
+        mask_logits: torch.Tensor, class_logits: torch.Tensor
+    ):
+        """
+        Convert query-level logits to per-pixel semantic scores using RAW class logits.
+        
+        This is used for energy computation, which requires raw logits (not probabilities).
+        
+        Args:
+            mask_logits: [B, Q, H, W] - mask predictions per query
+            class_logits: [B, Q, C+1] - class predictions per query (C classes + 1 no-object)
+        
+        Returns:
+            pixel_scores: [B, C, H, W] - per-pixel scores for C semantic classes (raw logits, not probabilities)
+        """
+        # mask: sigmoid ok (probabilità di presenza mask)
+        # class: RAW logits, exclude no-object
+        return torch.einsum(
+            "bqhw, bqc -> bchw",
+            mask_logits.sigmoid(),  # [B, Q, H, W] -> probabilità mask
+            class_logits[..., :-1],  # [B, Q, C] -> RAW logits (no softmax, exclude no-object)
         )
 
     @staticmethod

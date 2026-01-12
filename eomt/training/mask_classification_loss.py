@@ -193,9 +193,9 @@ class MaskClassificationLoss(Mask2FormerLoss):
                         ood_mask_tensor = torch.stack(ood_mask_list)  # [B, H, W]
                         target_h, target_w = ood_mask_tensor.shape[-2:]
                         
-                        # Import to_per_pixel_logits_semantic as static method
+                        # Import to_per_pixel_scores_semantic_raw as static method (for energy - uses RAW logits)
                         from training.lightning_module import LightningModule
-                        to_per_pixel_logits_semantic = LightningModule.to_per_pixel_logits_semantic
+                        to_per_pixel_scores_semantic_raw = LightningModule.to_per_pixel_scores_semantic_raw
                         
                         # Interpolate masks_queries_logits to match ood_mask resolution
                         from torch.nn.functional import interpolate
@@ -206,11 +206,11 @@ class MaskClassificationLoss(Mask2FormerLoss):
                             align_corners=False
                         )  # [B, Q, H, W]
                         
-                        # Compute per-pixel logits
-                        pixel_logits = to_per_pixel_logits_semantic(
+                        # Compute per-pixel scores (RAW logits, not probabilities) for energy
+                        pixel_logits = to_per_pixel_scores_semantic_raw(
                             masks_queries_logits_interp, 
                             class_queries_logits_original
-                        )  # [B, C, H, W]
+                        )  # [B, C, H, W] - RAW logits (no softmax on class_logits)
                         
                         # Safety check: ensure logits are finite
                         if torch.isfinite(pixel_logits).all():
