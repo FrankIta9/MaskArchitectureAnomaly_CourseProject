@@ -103,6 +103,7 @@ def main():
     batches_with_ood = 0
     ood_ratios = []  # Lista di ood_ratio per ogni batch con OOD
     overlap_ratios = []  # P0 - Problema #1: Lista di overlap_ratio per ogni batch con OOD
+    y_norm_centers = []  # Lista di y_norm_center (centro bbox OOD normalizzato) per ogni batch con OOD
     
     # Esempi con OOD (per overlay)
     ood_examples = []  # Lista di (batch_idx, sample_idx, img, ood_mask, overlap_ratio)
@@ -165,6 +166,16 @@ def main():
                     if overlap_ratio is not None:
                         overlap_ratios.append(overlap_ratio)
                     
+                    # Calcola y_norm_center (centro bbox OOD normalizzato)
+                    ood_pixels_mask = (ood_mask == 1)  # [H, W] bool
+                    if ood_pixels_mask.any():
+                        h, w = ood_mask.shape
+                        ood_y_coords = torch.nonzero(ood_pixels_mask, as_tuple=False)[:, 0]  # [N] y coordinates
+                        if ood_y_coords.numel() > 0:
+                            y_center = ood_y_coords.float().mean().item()
+                            y_norm_center = y_center / max(1.0, float(h - 1))
+                            y_norm_centers.append(y_norm_center)
+                    
                     # Salva esempio con OOD (max 3)
                     if len(ood_examples) < 3:
                         ood_examples.append((batch_idx, sample_idx, img, ood_mask, overlap_ratio))
@@ -216,6 +227,25 @@ def main():
         print(f"  P90: {ood_ratio_p90:.6f}")
         print(f"  P99: {ood_ratio_p99:.6f}")
         print()
+        
+        # Calcola y_norm_center statistics
+        if len(y_norm_centers) > 0:
+            y_norm_center_min = min(y_norm_centers)
+            y_norm_center_mean = np.mean(y_norm_centers)
+            y_norm_center_max = max(y_norm_centers)
+            y_norm_center_p50 = np.percentile(y_norm_centers, 50)
+            y_norm_center_p90 = np.percentile(y_norm_centers, 90)
+            
+            print(f"Y Norm Center (centro bbox OOD normalizzato, 0=top, 1=bottom):")
+            print(f"  Min: {y_norm_center_min:.4f}")
+            print(f"  Mean: {y_norm_center_mean:.4f}")
+            print(f"  Max: {y_norm_center_max:.4f}")
+            print(f"  P50 (median): {y_norm_center_p50:.4f}")
+            print(f"  P90: {y_norm_center_p90:.4f}")
+            print()
+        else:
+            print("⚠️  Nessun y_norm_center calcolato (nessun batch con OOD)")
+            print()
         
         # P0 - Problema #1: Calcola overlap_ratio statistics (OOD vs GT)
         if len(overlap_ratios) > 0:
@@ -329,55 +359,76 @@ def main():
     # VALUTAZIONE
     # ============================================================================
     print(f"{'='*60}")
-    print("🎯 Valutazione (Sanity Check S1):")
+    print("🎯 Valutazione (Sanity Check - Criteri Aggiornati):")
     print(f"{'='*60}\n")
     
-    # Target ragionevole: almeno 50-70% dei batch con OOD (S1 requirement)
-    target_min_pct = 50.0
-    target_p90_min = 0.005  # 0.5%
+    # Nuovi criteri target
+    target_pct_min = 60.0  # 60-80%
+    target_pct_max = 80.0
+    target_ood_ratio_p50 = 0.002  # ≥ 0.002
+    target_ood_ratio_p90 = 0.006  # ≥ 0.006
+    target_y_norm_p50 = 0.70  # ≥ 0.70
     
-    # Check percentuale batch con OOD
-    if pct_batches_with_ood >= target_min_pct:
-        print(f"✅ Percentuale batch con OOD ({pct_batches_with_ood:.2f}%) >= target ({target_min_pct}%)")
+    all_passed = True
+    
+    # Check 1: Percentuale batch con OOD (target 60-80%)
+    if target_pct_min <= pct_batches_with_ood <= target_pct_max:
+        print(f"✅ Percentuale batch con OOD ({pct_batches_with_ood:.2f}%) in range target [{target_pct_min}%, {target_pct_max}%]")
+    elif pct_batches_with_ood < target_pct_min:
+        print(f"❌ Percentuale batch con OOD ({pct_batches_with_ood:.2f}%) < target minimo ({target_pct_min}%)")
+        print(f"⚠️  Fix: Aumenta paste_probability (es. 0.5 → 0.6-0.7)")
+        all_passed = False
     else:
-        print(f"❌ Percentuale batch con OOD ({pct_batches_with_ood:.2f}%) < target ({target_min_pct}%)")
-        print(f"⚠️  Il paste COCO non sta funzionando abbastanza!")
-        print(f"⚠️  Target: ≥50-70% (anche 80% se gestito bene)")
-        print(f"⚠️  Fix: Aumenta paste_probability (es. 0.25 → 0.50)")
+        print(f"⚠️  Percentuale batch con OOD ({pct_batches_with_ood:.2f}%) > target massimo ({target_pct_max}%)")
+        print(f"⚠️  Potrebbe essere troppo aggressivo, ma accettabile")
     
-    # Check P90 ood_ratio
+    # Check 2-3: ood_ratio_p50 e p90
     if len(ood_ratios) > 0:
+        ood_ratio_p50 = np.percentile(ood_ratios, 50)
         ood_ratio_p90 = np.percentile(ood_ratios, 90)
-        if ood_ratio_p90 >= target_p90_min:
-            print(f"✅ P90 ood_ratio ({ood_ratio_p90:.6f}) >= target ({target_p90_min})")
-        else:
-            print(f"❌ P90 ood_ratio ({ood_ratio_p90:.6f}) < target ({target_p90_min})")
-            print(f"⚠️  Gli oggetti COCO sono troppo piccoli!")
-            print(f"⚠️  Fix: Aumenta min_scale, coco_min_area, o riduci filtri troppo stretti")
         
-        if ood_ratio_mean > 0.0001:
-            print(f"✅ OOD ratio medio ({ood_ratio_mean:.6f}) > 0.0001")
+        # Check P50
+        if ood_ratio_p50 >= target_ood_ratio_p50:
+            print(f"✅ ood_ratio_p50 ({ood_ratio_p50:.6f}) >= target ({target_ood_ratio_p50})")
         else:
-            print(f"❌ OOD ratio medio ({ood_ratio_mean:.6f}) <= 0.0001")
-            print(f"⚠️  Gli oggetti COCO sono troppo piccoli o rari!")
+            print(f"❌ ood_ratio_p50 ({ood_ratio_p50:.6f}) < target ({target_ood_ratio_p50})")
+            print(f"⚠️  Fix: Aumenta min_scale, max_scale, o coco_min_area")
+            all_passed = False
+        
+        # Check P90
+        if ood_ratio_p90 >= target_ood_ratio_p90:
+            print(f"✅ ood_ratio_p90 ({ood_ratio_p90:.6f}) >= target ({target_ood_ratio_p90})")
+        else:
+            print(f"❌ ood_ratio_p90 ({ood_ratio_p90:.6f}) < target ({target_ood_ratio_p90})")
+            print(f"⚠️  Fix: Aumenta min_scale, max_scale, o coco_min_area")
+            all_passed = False
+    else:
+        print(f"❌ Nessun ood_ratio calcolato!")
+        all_passed = False
+    
+    # Check 4: y_norm_p50
+    if len(y_norm_centers) > 0:
+        y_norm_center_p50 = np.percentile(y_norm_centers, 50)
+        if y_norm_center_p50 >= target_y_norm_p50:
+            print(f"✅ y_norm_p50 ({y_norm_center_p50:.4f}) >= target ({target_y_norm_p50})")
+        else:
+            print(f"❌ y_norm_p50 ({y_norm_center_p50:.4f}) < target ({target_y_norm_p50})")
+            print(f"⚠️  Gli oggetti OOD sono troppo in alto (cielo invece di strada)")
+            print(f"⚠️  Fix: Verifica paste_y_range, drivable_mask, o perspective_aware")
+            all_passed = False
+    else:
+        print(f"❌ Nessun y_norm_center calcolato!")
+        all_passed = False
     
     print(f"\n✅ Overlay salvati in: {output_dir}")
     
-    # Exit code (S1 requirements)
-    if len(ood_ratios) > 0:
-        ood_ratio_p90 = np.percentile(ood_ratios, 90)
-        if (pct_batches_with_ood >= target_min_pct and 
-            ood_ratio_p90 >= target_p90_min and 
-            ood_ratio_mean > 0.0001):
-            print("\n✅ Sanity Check S1 PASSATO: Il paste COCO sta funzionando!")
-            sys.exit(0)
-        else:
-            print("\n❌ Sanity Check S1 FALLITO: Il paste COCO non sta funzionando abbastanza!")
-            print("⚠️  Fai debug dei parametri di paste (paste_probability, filtri, ecc.)")
-            print("⚠️  NON procedere con training lungo finché S1 non passa!")
-            sys.exit(1)
+    # Exit code
+    if all_passed:
+        print("\n✅ Sanity Check PASSATO: Tutti i criteri soddisfatti!")
+        sys.exit(0)
     else:
-        print("\n❌ Sanity Check S1 FALLITO: Nessun batch con OOD!")
+        print("\n❌ Sanity Check FALLITO: Alcuni criteri non soddisfatti!")
+        print("⚠️  NON procedere con training lungo finché il sanity check non passa!")
         sys.exit(1)
 
 

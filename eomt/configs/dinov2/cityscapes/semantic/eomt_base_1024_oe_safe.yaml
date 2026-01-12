@@ -30,11 +30,13 @@ trainer:
   precision: "32-true"  # Full precision per stabilità
   gradient_clip_val: 1.0
   
-  # Checkpoint salvati (adatta il path)
+  # Checkpoint salvati sul drive (adatta il path se necessario)
+  # Per Colab: usa /content/drive/MyDrive/checkpoints
+  # Per locale: usa un path assoluto o relativo
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: "./checkpoints"
+        dirpath: "/content/drive/MyDrive/checkpoints"  # Colab Drive path (modifica se necessario)
         filename: "eomt_1024_oe_energy_safe-{epoch:03d}-{metrics/val_iou_all:.4f}"
         monitor: "metrics/val_iou_all"
         mode: "max"
