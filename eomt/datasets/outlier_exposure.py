@@ -862,6 +862,31 @@ class COCOOutlierDataset:
                 f"No valid objects found in COCO {self.split}. "
                 f"Try reducing min_area (current: {self.min_area})"
             )
+        
+        # Log category statistics
+        from collections import Counter
+        category_ids = [obj['ann']['category_id'] for obj in self.valid_objects]
+        category_counts = Counter(category_ids)
+        
+        # Get category names
+        cat_ids_unique = list(category_counts.keys())
+        cats = self.coco.loadCats(cat_ids_unique)
+        cat_id_to_name = {cat['id']: cat['name'] for cat in cats}
+        
+        # Sort by count (descending)
+        sorted_categories = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        print(f"\n📊 COCO Categories in valid_objects ({len(category_counts)} unique categories):")
+        print(f"   Total objects: {len(self.valid_objects)}")
+        print(f"   Top 20 categories by count:")
+        for cat_id, count in sorted_categories[:20]:
+            cat_name = cat_id_to_name.get(cat_id, f"unknown_{cat_id}")
+            percentage = (count / len(self.valid_objects)) * 100
+            print(f"     {cat_id:2d} ({cat_name:20s}): {count:5d} objects ({percentage:5.2f}%)")
+        
+        if len(sorted_categories) > 20:
+            print(f"     ... and {len(sorted_categories) - 20} more categories")
+        print()
     
     def _load_image_from_directory(self, img_info: dict) -> np.ndarray:
         """Load image from directory."""
