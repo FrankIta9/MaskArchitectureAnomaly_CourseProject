@@ -130,12 +130,31 @@ class LightningModule(lightning.LightningModule):
             incompatible_keys = self.load_state_dict(combined_state_dict, strict=False)
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
         elif ckpt_path:
+            # Log dettagliato per verifica caricamento checkpoint Cityscapes
+            logging.info("\n" + "="*70)
+            logging.info("🔍 CITYSCAPES CHECKPOINT VERIFICATION")
+            logging.info("="*70)
+            logging.info(f"📁 Checkpoint path: {ckpt_path}")
+            
+            import os
+            if os.path.exists(ckpt_path):
+                file_size = os.path.getsize(ckpt_path) / (1024 * 1024)  # MB
+                logging.info(f"✅ Checkpoint file exists: {file_size:.2f} MB")
+            else:
+                logging.error(f"❌ ERROR: Checkpoint file NOT found at: {ckpt_path}")
+                raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+            
             ckpt = self._load_ckpt(ckpt_path, load_ckpt_class_head)
             incompatible_keys = self.load_state_dict(ckpt, strict=False)
             
             # Verifica checkpoint: stampa missing/unexpected keys e verifica "parto da 81.7"
             missing_keys = incompatible_keys.missing_keys
             unexpected_keys = incompatible_keys.unexpected_keys
+            
+            logging.info(f"\n📊 Checkpoint loading summary:")
+            logging.info(f"   Total keys in checkpoint: {len(ckpt)}")
+            logging.info(f"   Missing keys: {len(missing_keys)}")
+            logging.info(f"   Unexpected keys: {len(unexpected_keys)}")
             
             # Filtra missing_keys critici vs non critici
             critical_missing = [k for k in missing_keys if not any(x in k for x in ["buffer", "metric", "criterion.empty_weight", "_energy_", "_ood_mask_print_count"])]
@@ -180,10 +199,37 @@ class LightningModule(lightning.LightningModule):
                 logging.info("✅ No unexpected keys in checkpoint - OK")
             
             # Summary finale
+            logging.info(f"\n📋 Final verification:")
             if not critical_missing and not critical_unexpected:
                 logging.info("✅ CHECKPOINT VERIFICATION PASSED: Parti dal modello corretto (81.7 mIoU)")
+                logging.info("   ✅ All critical keys loaded successfully")
+                logging.info("   ✅ No unexpected critical keys")
             else:
                 logging.error("❌ CHECKPOINT VERIFICATION FAILED: Verifica che stai usando il checkpoint corretto!")
+                if critical_missing:
+                    logging.error(f"   ❌ {len(critical_missing)} critical keys missing")
+                if critical_unexpected:
+                    logging.error(f"   ❌ {len(critical_unexpected)} critical unexpected keys")
+            
+            # Verifica pesi caricati (sample di alcuni layer chiave)
+            logging.info(f"\n🔍 Verifying loaded weights (sample of key layers):")
+            key_layers = ["network.encoder.backbone", "network.class_head", "network.mask_head"]
+            for layer_prefix in key_layers:
+                layer_params = [k for k in self.state_dict().keys() if k.startswith(layer_prefix)]
+                if layer_params:
+                    # Check first parameter as sample
+                    sample_key = layer_params[0]
+                    sample_param = self.state_dict()[sample_key]
+                    is_finite = torch.isfinite(sample_param).all().item()
+                    mean_val = sample_param.mean().item()
+                    std_val = sample_param.std().item()
+                    logging.info(f"   ✅ {layer_prefix}: {len(layer_params)} params, "
+                               f"sample shape={sample_param.shape}, "
+                               f"finite={is_finite}, mean={mean_val:.6f}, std={std_val:.6f}")
+                else:
+                    logging.warning(f"   ⚠️  {layer_prefix}: No parameters found!")
+            
+            logging.info("="*70 + "\n")
             
             # Check if class_head weights were loaded correctly
             if load_ckpt_class_head:
@@ -1843,15 +1889,33 @@ class LightningModule(lightning.LightningModule):
             logging.warning(f"⚠️ Cleaned {cleaned_keys} parameters with complex/NaN/Inf values")
         
         # Log which keys were loaded (especially important for debugging)
+        logging.info(f"📦 Checkpoint structure:")
+        logging.info(f"   Total keys loaded: {len(ckpt)}")
+        
+        # Count keys by component
+        encoder_keys = [k for k in ckpt.keys() if "encoder" in k or "backbone" in k]
         class_head_keys = [k for k in ckpt.keys() if "class_head" in k]
+        mask_head_keys = [k for k in ckpt.keys() if "mask_head" in k]
+        other_keys = [k for k in ckpt.keys() if not any(x in k for x in ["encoder", "backbone", "class_head", "mask_head"])]
+        
+        logging.info(f"   Encoder/Backbone keys: {len(encoder_keys)}")
+        logging.info(f"   Class head keys: {len(class_head_keys)}")
+        logging.info(f"   Mask head keys: {len(mask_head_keys)}")
+        logging.info(f"   Other keys: {len(other_keys)}")
+        
         if class_head_keys:
-            logging.info(f"✅ Found class_head weights in checkpoint: {class_head_keys}")
+            logging.info(f"   ✅ Found class_head weights: {class_head_keys}")
         else:
             if load_ckpt_class_head:
-                logging.warning("⚠️ class_head weights NOT found in checkpoint!")
-                logging.warning(f"   Checkpoint keys (sample): {list(ckpt.keys())[:10]}...")
+                logging.warning("   ⚠️  class_head weights NOT found in checkpoint!")
+                logging.warning(f"      Checkpoint keys (sample): {list(ckpt.keys())[:10]}...")
         
-        logging.info(f"Loaded {len(ckpt)} keys from checkpoint")
+        # Sample some key shapes for verification
+        if encoder_keys:
+            sample_encoder_key = encoder_keys[0]
+            sample_shape = ckpt[sample_encoder_key].shape if isinstance(ckpt[sample_encoder_key], torch.Tensor) else "N/A"
+            logging.info(f"   Sample encoder key: {sample_encoder_key}, shape: {sample_shape}")
+        
         return ckpt
 
     def _raise_on_incompatible(self, incompatible_keys, load_ckpt_class_head):
