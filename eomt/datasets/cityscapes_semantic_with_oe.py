@@ -173,6 +173,7 @@ class CityscapesSemanticWithOE(LightningDataModule):
         return masks, labels, [False for _ in range(len(masks))], semseg
 
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
+        """Setup Cityscapes dataset with logging for verification."""
         cityscapes_dataset_kwargs = {
             "img_suffix": ".png",
             "target_suffix": ".png",
@@ -194,6 +195,17 @@ class CityscapesSemanticWithOE(LightningDataModule):
             target_folder_path_in_zip=Path("./gtFine/val"),
             **cityscapes_dataset_kwargs,
         )
+        
+        # Log per verificare che Cityscapes sia caricato correttamente
+        print(f"✅ Cityscapes dataset loaded:")
+        print(f"   Train samples: {len(self.cityscapes_train_dataset)}")
+        print(f"   Val samples: {len(self.cityscapes_val_dataset)}")
+        print(f"   Path: {self.path}")
+        print(f"   Num classes: {self.num_classes}")
+        if hasattr(self, 'transforms') and self.transforms is not None:
+            print(f"   Transforms: {type(self.transforms).__name__}")
+            if hasattr(self.transforms, 'outlier_exposure_transform') and self.transforms.outlier_exposure_transform is not None:
+                print(f"   ✅ Outlier Exposure enabled")
 
         return self
 

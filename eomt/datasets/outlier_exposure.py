@@ -283,8 +283,9 @@ class OutlierExposureTransform(nn.Module):
             # HYBRID STRATEGY: ID augmentation vs OOD augmentation
             # FIX 1: Scrittura SOLO su pixel già IGNORE (semseg==255) + valid_mask
             # FIX 2: Elimina doppio indexing usando patch locale
-            # FIX 3: Verifica paste_mask sia solo oggetto (non bbox)
+            # FIX 3: paste_mask deve essere esattamente write_mask (non obj_mask_resized)
             
+            write_mask = None
             if "semseg" in target:
                 # Extract patch
                 semseg_patch = target["semseg"][y:y_end, x:x_end].clone()  # [H_patch, W_patch]
@@ -296,6 +297,10 @@ class OutlierExposureTransform(nn.Module):
                 if "valid_mask" in target:
                     vm_patch = target["valid_mask"][y:y_end, x:x_end].to(torch.bool)
                     write_mask = write_mask & vm_patch
+                
+                # Fail-fast: se write_mask è vuoto, skip questo oggetto
+                if write_mask.sum() == 0:
+                    return img, target, paste_mask, False  # Skip oggetto (non ha scritto niente)
                 
                 # FIX 2: Usa patch locale invece di doppio indexing
                 if category_name in COCO_TO_CS_TRAINID:
@@ -311,10 +316,26 @@ class OutlierExposureTransform(nn.Module):
                     semseg_patch[write_mask] = 255
                     target["semseg"][y:y_end, x:x_end] = semseg_patch
                     # ood_mask will be set to 1 in forward() based on paste_mask
+            else:
+                # Se non c'è semseg, usa obj_mask_resized come fallback
+                write_mask = obj_mask_resized
             
-            # FIX 3: paste_mask = SOLO dove oggetto è 1 (non bbox piena)
-            # Assicurati che paste_mask sia esattamente obj_mask_resized alle coordinate corrette
-            paste_mask[y:y_end, x:x_end] = paste_mask[y:y_end, x:x_end] | obj_mask_resized
+            # FIX 3: paste_mask deve essere esattamente write_mask (non obj_mask_resized)
+            # Questo garantisce che paste_mask == pixel dove abbiamo scritto davvero
+            # Per OOD: paste_mask == write_mask == pixel dove semseg==255
+            # Per ID: paste_mask == write_mask == pixel dove abbiamo scritto trainId
+            if write_mask is not None:
+                paste_mask[y:y_end, x:x_end] = paste_mask[y:y_end, x:x_end] | write_mask
+                
+                # Assert post-condizione: per OOD paste, paste_mask deve essere subset di write_mask
+                if category_name not in COCO_TO_CS_TRAINID:
+                    paste_mask_patch = paste_mask[y:y_end, x:x_end]
+                    extra_pixels = (paste_mask_patch & ~write_mask).sum().item()
+                    if extra_pixels > 0:
+                        import warnings
+                        warnings.warn(
+                            f"⚠️ Post-condition violation: {extra_pixels} pixels in paste_mask but not in write_mask for OOD paste!"
+                        )
             
             return img_clone, target, paste_mask, True  # Success
         
@@ -599,30 +620,37 @@ class OutlierExposureTransform(nn.Module):
                 assert target["semseg"].dtype in (torch.int64, torch.long), \
                     f"semseg dtype must be int64/long, got {target['semseg'].dtype}"
             
-            # 2. Invariant ID/OOD
+            # 2. Invariant ID/OOD (post-condizione critica)
             if "semseg" in target and "ood_mask" in target:
                 semseg = target["semseg"]
                 ood_mask_bool = (ood_mask == 1)
                 
+                # CRITICAL INVARIANT: ood_mask==1 -> semseg==255 (sempre)
+                ood_not_ignore = (ood_mask_bool & (semseg != 255)).sum().item()
+                if ood_not_ignore > 0:
+                    import warnings
+                    ood_semseg = semseg[ood_mask_bool]
+                    unique_ood_semseg = torch.unique(ood_semseg).tolist()
+                    warnings.warn(
+                        f"⚠️ CRITICAL Invariant violation: {ood_not_ignore} OOD pixels have semseg != 255! "
+                        f"Unique values in OOD region: {unique_ood_semseg}. "
+                        f"This indicates paste_mask != write_mask bug."
+                    )
+                
                 # ID-paste invariant: ood_mask==1 NON deve avere semseg in trainIds mappati
                 mappable_trainids = set(COCO_TO_CS_TRAINID.values())
-                ood_semseg = semseg[ood_mask_bool]
                 if ood_semseg.numel() > 0:
                     ood_has_mappable = (ood_semseg.unsqueeze(0) == torch.tensor(list(mappable_trainids), device=ood_semseg.device).unsqueeze(1)).any(dim=0).any()
                     if ood_has_mappable:
                         import warnings
                         warnings.warn(
                             f"⚠️ Invariant violation: ood_mask==1 has mappable trainIds! "
-                            f"Unique values in OOD region: {torch.unique(ood_semseg).tolist()}"
+                            f"Unique values in OOD region: {unique_ood_semseg}"
                         )
                 
-                # OOD-paste invariant: ood_mask==1 deve avere semseg==255
-                ood_not_ignore = (ood_mask_bool & (semseg != 255)).sum().item()
-                if ood_not_ignore > 0:
-                    import warnings
-                    warnings.warn(
-                        f"⚠️ Invariant violation: {ood_not_ignore} OOD pixels have semseg != 255!"
-                    )
+                # Assert finale: garantire invariante sempre
+                assert ood_not_ignore == 0, \
+                    f"CRITICAL: {ood_not_ignore} OOD pixels have semseg != 255. Invariant violated!"
         
         self._debug_batch_count += 1
         
