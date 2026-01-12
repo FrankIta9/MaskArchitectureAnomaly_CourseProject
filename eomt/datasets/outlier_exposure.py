@@ -264,52 +264,38 @@ class OutlierExposureTransform(nn.Module):
             else:
                 base_scale = random.uniform(self.min_scale, self.max_scale)
             
-            # First, sample an approximate Y position for perspective-aware scaling
-            # If drivable regions are enabled, prefer lower Y (closer to camera, more drivable)
-            if drivable_mask is not None and drivable_mask.any():
-                # Sample Y from lower half more often (closer to camera)
-                # 70% chance to sample from lower half, 30% from upper half
-                if random.random() < 0.7:
-                    y_approx = random.randint(h // 2, h - 1)  # Lower half
-                else:
-                    y_approx = random.randint(0, h // 2)  # Upper half
-            else:
-                y_approx = random.randint(0, h - 1)
+            # P0 Fix: Scegli y biased prima (con paste_y_range), poi calcola scale, poi ricalcola dimensioni
+            # 1) Scegli y (biased verso bottom = on-road proxy)
+            y_min_ratio, y_max_ratio = self.paste_y_range
+            y_min = int(y_min_ratio * h)
+            y_max = int(y_max_ratio * h)
+            y = random.randint(y_min, y_max)
             
-            # Apply perspective-aware scaling based on approximate Y position
-            scale = self._apply_perspective_aware_scale(base_scale, y_approx, h)
-            
-            # Clamp scale to valid range
+            # 2) Applica scala prospettica basata su y
+            scale = self._apply_perspective_aware_scale(base_scale, y, h)
             scale = max(self.min_scale, min(self.max_scale * 1.5, scale))  # Allow slightly larger for perspective
             
-            # Calculate final object dimensions after scaling
+            # 3) Ricalcola dimensioni con scale finale
             obj_h_scaled = max(1, int(obj_h_orig * scale))
             obj_w_scaled = max(1, int(obj_w_orig * scale))
             obj_h_scaled = min(obj_h_scaled, h)
             obj_w_scaled = min(obj_w_scaled, w)
             
-            # Sample position (with drivable region constraint if enabled)
-            # Task 5: Track drivable vs random placements for debugging
-            position = None
-            if drivable_mask is not None:
-                # Try to sample from drivable regions using scaled dimensions
-                position = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
+            # 4) Scegli x e clamp y con dimensioni nuove
+            x = random.randint(0, max(0, w - obj_w_scaled))
+            y = min(y, max(0, h - obj_h_scaled))  # Clamp y per evitare overflow
             
-            # Fallback to random position if drivable sampling failed
-            if position is None:
-                x = random.randint(0, max(0, w - obj_w_scaled))
-                y = random.randint(0, max(0, h - obj_h_scaled))
-                self.random_placement_count += 1  # Task 5: Count random fallback
-                
-                # Re-apply perspective-aware scaling based on final Y position
-                scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                scale = max(self.min_scale, min(self.max_scale * 1.5, scale))
+            # 5) Prova drivable position se abilitato (con dimensioni corrette)
+            if drivable_mask is not None and drivable_mask.any():
+                # Try to sample from drivable regions using final scaled dimensions
+                position = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
+                if position is not None:
+                    x, y = position
+                    self.drivable_placement_count += 1
+                else:
+                    self.random_placement_count += 1  # Fallback: usa x,y già scelti (già biased verso bottom)
             else:
-                x, y = position
-                self.drivable_placement_count += 1  # Task 5: Count successful drivable placement
-                # Re-apply perspective-aware scaling based on final Y position
-                scale = self._apply_perspective_aware_scale(base_scale, y, h)
-                scale = max(self.min_scale, min(self.max_scale * 1.5, scale))
+                self.random_placement_count += 1  # No drivable mask: usa x,y già scelti (già biased verso bottom)
             
             # Paste object and get paste_mask
             img, target, paste_mask = self._paste_object(
