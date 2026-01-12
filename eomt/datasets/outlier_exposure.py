@@ -159,6 +159,7 @@ class OutlierExposureTransform(nn.Module):
         self._skipped_no_position = 0
         self._skipped_shape_mismatch = 0
         self._skipped_alpha0 = 0
+        self._skipped_too_small = 0
         self._log_reality_check = True  # Always enabled, logging controlled in lightning_module
         self._paste_trace_enabled = False  # Enabled for first 50 batches
     
@@ -210,6 +211,18 @@ class OutlierExposureTransform(nn.Module):
         # Initialize paste_mask as zeros (no paste yet)
         paste_mask = torch.zeros((h, w), dtype=torch.bool, device=img.device)
         
+        # Fix: Verifica che la maschera originale non sia vuota
+        obj_mask_sum_original = obj_mask.sum().item()
+        if obj_mask_sum_original == 0:
+            if self._log_reality_check:
+                self._skipped_too_small = getattr(self, '_skipped_too_small', 0) + 1
+            if self._paste_trace_enabled:
+                import logging
+                logging.info(
+                    f"🔍 Paste Trace (SKIP) - obj_mask original is empty: sum=0"
+                )
+            return img, target, paste_mask, False  # Skip oggetto con maschera vuota
+        
         # Resize object based on scale
         new_h = int(obj_h * scale)
         new_w = int(obj_w * scale)
@@ -223,6 +236,20 @@ class OutlierExposureTransform(nn.Module):
                 (new_h, new_w), 
                 interpolation=F.InterpolationMode.NEAREST
             ).squeeze(0).bool()
+            
+            # Fix: Scarta oggetti troppo piccoli dopo resize
+            obj_mask_sum_after_resize = obj_mask_resized.sum().item()
+            MIN_OBJ_PIXELS = 50  # Soglia minima pixel dopo resize
+            if obj_mask_sum_after_resize < MIN_OBJ_PIXELS:
+                if self._log_reality_check:
+                    self._skipped_too_small = getattr(self, '_skipped_too_small', 0) + 1
+                if self._paste_trace_enabled:
+                    import logging
+                    logging.info(
+                        f"🔍 Paste Trace (SKIP) - obj_mask too small after resize: "
+                        f"sum={obj_mask_sum_after_resize} < {MIN_OBJ_PIXELS}"
+                    )
+                return img, target, paste_mask, False  # Skip oggetto troppo piccolo
             
             # Calculate paste region
             x, y = position
@@ -301,9 +328,11 @@ class OutlierExposureTransform(nn.Module):
             write_mask = obj_mask_resized.clone()
             
             # Constraint: solo valid_mask (no padding/letterbox)
+            region_mask = None
             if "valid_mask" in target:
                 vm_patch = target["valid_mask"][y:y_end, x:x_end].to(torch.bool)
                 vm_sum = vm_patch.sum().item()
+                region_mask = vm_patch
                 write_mask = write_mask & vm_patch
             
             # Per paste trace: semseg255_sum (solo per info, non usato per decisione)
@@ -314,11 +343,26 @@ class OutlierExposureTransform(nn.Module):
             write_sum = write_mask.sum().item()
             skip_reason = None
             
-            # Fail-fast: se write_mask è vuoto, skip questo oggetto
+            # Diagnosi "a martello": log dettagliato quando paste_mask è vuota
             if write_sum == 0:
                 if self._log_reality_check:
                     self._skipped_write0 += 1
                 skip_reason = "write0"
+                
+                # Diagnosi dettagliata: chi sta azzerando la maschera?
+                reg_sum = int(region_mask.sum().item()) if region_mask is not None else None
+                print(f"❌ paste_mask empty - obj_sum={obj_mask_sum}, reg_sum={reg_sum}, "
+                      f"x={x}, y={y}, w={new_w}, h={new_h}, "
+                      f"x_end={x_end}, y_end={y_end}, "
+                      f"img_shape={img.shape[-2:]}, target_shape={target.get('valid_mask', torch.tensor([])).shape if 'valid_mask' in target else 'N/A'}")
+                
+                # Interpretazione immediata
+                if obj_mask_sum == 0:
+                    print("   🔍 DIAGNOSI: obj_mask_sum == 0 → la mask dell'oggetto è vuota (conversione o resize)")
+                elif obj_mask_sum > 0 and reg_sum == 0:
+                    print("   🔍 DIAGNOSI: obj_mask_sum > 0 ma reg_sum == 0 → region_mask è sbagliata o troppo restrittiva")
+                elif obj_mask_sum > 0 and reg_sum is not None and reg_sum > 0:
+                    print("   🔍 DIAGNOSI: obj_mask_sum > 0 e reg_sum > 0 ma write_sum == 0 → problema nel posizionamento/overlap/vincoli finali")
                 
                 # Paste trace: log anche per skip
                 if self._paste_trace_enabled:
@@ -564,7 +608,7 @@ class OutlierExposureTransform(nn.Module):
                             retry_count += 1
                         if retry_count >= max_retries:
                             continue  # Skip this object if no non-mappable category found
-                
+            
             # Select base scale using weighted distribution if enabled, otherwise uniform
             if self.use_weighted_scale:
                 base_scale = self._sample_weighted_scale()
@@ -606,7 +650,7 @@ class OutlierExposureTransform(nn.Module):
                             position2 = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
                             if position2 is not None:
                                 x, y = position2
-                            else:
+                else:
                                 # Fallback safe: random solo in valid+bottom
                                 y_min = int(0.7 * h)
                                 x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
@@ -614,7 +658,7 @@ class OutlierExposureTransform(nn.Module):
                                     if self._log_reality_check:
                                         self._skipped_no_position += 1
                                     continue  # Skip this object
-                        else:
+            else:
                             # Verifica che l'oggetto ci stia ancora nella posizione scelta
                             if x + obj_w_scaled > w or y + obj_h_scaled > h:
                                 # Se non ci sta, clamp x,y
@@ -647,11 +691,11 @@ class OutlierExposureTransform(nn.Module):
                 scale = self._apply_perspective_aware_scale(base_scale, y, h)
                 scale = max(self.min_scale, min(self.max_scale * 2.0, scale))
                 
-                obj_h_scaled = max(1, int(obj_h_orig * scale))
-                obj_w_scaled = max(1, int(obj_w_orig * scale))
-                obj_h_scaled = min(obj_h_scaled, h)
-                obj_w_scaled = min(obj_w_scaled, w)
-                
+            obj_h_scaled = max(1, int(obj_h_orig * scale))
+            obj_w_scaled = max(1, int(obj_w_orig * scale))
+            obj_h_scaled = min(obj_h_scaled, h)
+            obj_w_scaled = min(obj_w_scaled, w)
+            
                 # Fix: Usa fallback_safe_position anche qui per evitare padding
                 x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
                 if x is None:
@@ -781,6 +825,7 @@ class OutlierExposureTransform(nn.Module):
                 "skipped_no_position": self._skipped_no_position,
                 "skipped_shape_mismatch": self._skipped_shape_mismatch,
                 "skipped_alpha0": self._skipped_alpha0,
+                "skipped_too_small": self._skipped_too_small,
             }
         
         # DEBUG: Assert/warn per invarianti (solo primi 200 batch)
@@ -1011,7 +1056,7 @@ class OutlierExposureTransform(nn.Module):
                 if y < y_low_relaxed:
                     continue
                 if y <= max_y and x <= max_x:
-                    valid_positions.append([y, x])
+                valid_positions.append([y, x])
         
         if len(valid_positions) == 0:
             return None
