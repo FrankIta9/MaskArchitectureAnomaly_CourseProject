@@ -168,8 +168,18 @@ class Transforms(nn.Module):
             Filtered target dictionary
             
         Note:
-            Fields like 'ood_mask' (pixel-wise [H, W]) are excluded from filtering
-            as they are not arrays of masks but single pixel-wise masks.
+            Only instance-level fields (first dimension = len(keep)) are filtered:
+            - masks: [N, H, W]
+            - labels: [N]
+            - is_crowd: [N]
+            - boxes: [N, 4] (if present)
+            - area: [N] (if present)
+            
+            Pixel-wise fields and scalars are left unchanged:
+            - semseg: [H, W]
+            - valid_mask: [H, W]
+            - ood_mask: [H, W]
+            - image_id, orig_size, size, etc. (scalars/metadata)
         """
         filtered = {}
         # Fields to exclude from filtering (pixel-wise, not arrays)
@@ -182,22 +192,33 @@ class Transforms(nn.Module):
         if "is_crowd" in target:
             target["is_crowd"] = _to_1d_tensor(target["is_crowd"], dtype=torch.bool)
         
+        n_keep = keep.sum().item() if isinstance(keep, Tensor) else len(keep)
+        
         for k, v in target.items():
             if k in exclude_from_filter:
                 # Skip filtering for pixel-wise fields
                 filtered[k] = v
-            else:
-                # Apply filtering for array fields (masks, labels, is_crowd)
-                if isinstance(v, (list, tuple)):
-                    # For Python lists/tuples, use list comprehension with keep_indices
+            elif isinstance(v, (list, tuple)):
+                # For Python lists/tuples: check if length matches keep
+                if len(v) == len(keep):
+                    # Instance-level list: apply filtering
                     keep_indices = keep.nonzero(as_tuple=False).squeeze(-1).tolist() if isinstance(keep, Tensor) else keep
                     filtered[k] = [v[i] for i in keep_indices]
-                elif torch.is_tensor(v):
-                    # Handle tensors directly (labels/is_crowd ora sono Tensor garantiti)
+                else:
+                    # Scalar or metadata: leave unchanged
+                    filtered[k] = v
+            elif torch.is_tensor(v):
+                # For tensors: check if first dimension matches len(keep)
+                if v.ndim > 0 and v.shape[0] == len(keep):
+                    # Instance-level tensor: apply filtering
                     filtered[k] = v[keep]
                 else:
-                    # Fallback: use wrap for TVTensors or other types
-                    filtered[k] = wrap(v[keep], like=v)
+                    # Pixel-wise tensor (e.g., [H, W]) or scalar: leave unchanged
+                    filtered[k] = v
+            else:
+                # For other types (dict, scalar, etc.): leave unchanged
+                # Don't try to index with keep as it may cause KeyError
+                filtered[k] = v
         
         return filtered
 
