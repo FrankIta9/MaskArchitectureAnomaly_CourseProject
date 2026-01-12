@@ -130,8 +130,9 @@ class Transforms(nn.Module):
     def pad(
         self, img: Tensor, target: dict[str, Any]
     ) -> tuple[Tensor, dict[str, Union[Tensor, TVTensor]]]:
-        pad_h = max(0, self.img_size[-2] - img.shape[-2])
-        pad_w = max(0, self.img_size[-1] - img.shape[-1])
+        H0, W0 = img.shape[-2], img.shape[-1]
+        pad_h = max(0, self.img_size[-2] - H0)
+        pad_w = max(0, self.img_size[-1] - W0)
         padding = [0, 0, pad_w, pad_h]
 
         # Pad img con 0 (nero)
@@ -144,6 +145,11 @@ class Transforms(nn.Module):
         if "semseg" in target:
             semseg = target["semseg"]
             target["semseg"] = F.pad(semseg, padding, fill=255)
+
+        # NEW: valid_mask - 1 dove c'era immagine originale, 0 dove è padding
+        valid = torch.zeros((self.img_size[-2], self.img_size[-1]), dtype=torch.bool, device=img.device)
+        valid[:H0, :W0] = True
+        target["valid_mask"] = valid
 
         return img, target
 

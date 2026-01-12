@@ -265,19 +265,30 @@ class OutlierExposureTransform(nn.Module):
         # Get drivable mask once for all objects
         drivable_mask = self._get_drivable_mask(target, h, w)
         
-        # Fix: Escludi pixel padding/letterbox (semseg == 255) dal sampling
-        # Questo evita OOD "nel vuoto" nero che può insegnare scorciatoie al modello
-        if drivable_mask is not None and "semseg" in target:
-            IGNORE = 255
-            valid_semseg = (target["semseg"] != IGNORE)  # [H, W] bool
-            # Assicura stessa shape di drivable_mask
-            if valid_semseg.shape != drivable_mask.shape:
-                # Resize valid_semseg a drivable_mask shape (nearest)
-                valid_semseg_rs = valid_semseg.to(torch.float32)[None, None, ...]
-                valid_semseg_rs = F.interpolate(valid_semseg_rs, size=drivable_mask.shape[-2:], mode="nearest")
-                valid_semseg = valid_semseg_rs[0, 0].to(torch.bool)
-            # Combina: drivable AND not padding
-            drivable_mask = drivable_mask & valid_semseg
+        # Fix: Escludi pixel padding/letterbox e imponi y >= 0.7H
+        # Questo evita OOD "nel vuoto" nero e oggetti "in cielo"
+        y_min = int(0.7 * h)
+        
+        if drivable_mask is not None:
+            # valid area: preferisci target["valid_mask"] se c'è
+            if "valid_mask" in target:
+                valid_area = target["valid_mask"]
+            elif "semseg" in target:
+                valid_area = (target["semseg"] != 255)
+            else:
+                valid_area = None
+
+            if valid_area is not None:
+                if valid_area.shape != drivable_mask.shape:
+                    valid_area_rs = valid_area.to(torch.float32)[None, None, ...]
+                    valid_area_rs = F.interpolate(valid_area_rs, size=drivable_mask.shape[-2:], mode="nearest")
+                    valid_area = valid_area_rs[0, 0].to(torch.bool)
+
+                drivable_mask = drivable_mask & valid_area
+
+            # NEW: bottom constraint - y >= 0.7H
+            drivable_mask[:y_min, :] = False
+
             if not drivable_mask.any():
                 drivable_mask = None  # Nessuna posizione valida
         
@@ -330,15 +341,33 @@ class OutlierExposureTransform(nn.Module):
                         obj_h_scaled = min(obj_h_scaled, h)
                         obj_w_scaled = min(obj_w_scaled, w)
                         
-                        # Verifica che l'oggetto ci stia ancora nella posizione scelta
-                        if x + obj_w_scaled > w or y + obj_h_scaled > h:
-                            # Se non ci sta, clamp x,y
-                            x = min(x, max(0, w - obj_w_scaled))
-                            y = min(y, max(0, h - obj_h_scaled))
+                        # Fix 4: Validare che dopo ricalcolo dimensioni, posizione sia ancora valida
+                        y_end = min(y + obj_h_scaled, h)
+                        x_end = min(x + obj_w_scaled, w)
+                        region = drivable_mask[y:y_end, x:x_end]
+                        if region.numel() == 0 or (region.float().mean().item() < 0.6):
+                            # Riprova con dimensioni finali
+                            position2 = self._sample_drivable_position(drivable_mask, obj_h_scaled, obj_w_scaled, h, w)
+                            if position2 is not None:
+                                x, y = position2
+                            else:
+                                # Fallback safe: random solo in valid+bottom
+                                y_min = int(0.7 * h)
+                                x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
+                                if x is None:
+                                    continue  # Skip this object
+                        else:
+                            # Verifica che l'oggetto ci stia ancora nella posizione scelta
+                            if x + obj_w_scaled > w or y + obj_h_scaled > h:
+                                # Se non ci sta, clamp x,y
+                                x = min(x, max(0, w - obj_w_scaled))
+                                y = min(y, max(0, h - obj_h_scaled))
                     else:
-                        # REGOLA D'ORO: Se drivable placement fallisce, SKIPPA il paste
-                        # Non fare fallback random perché potrebbe piazzare nel padding nero
-                        continue  # Skip this object, try next one
+                        # Fallback safe: random solo in valid+bottom (non continue aggressivo)
+                        y_min = int(0.7 * h)
+                        x, y = self._fallback_safe_position(target, obj_h_est, obj_w_est, h, w, y_min)
+                        if x is None:
+                            continue  # Skip this object if no valid position
                 else:
                     # ORDINE CLASSICO: y -> scale -> x (quando non c'è drivable_mask)
                     self.random_placement_count += 1
@@ -628,6 +657,82 @@ class OutlierExposureTransform(nn.Module):
         
         # Fallback: return None, will use random position in forward
         return None
+    
+    def _fallback_safe_position(
+        self, target: Dict[str, Any], obj_h: int, obj_w: int, h: int, w: int, y_min: int
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Fallback safe: random position solo in valid_area e bottom band (y >= y_min).
+        Non piazza mai nel padding nero.
+        
+        Args:
+            target: Target dictionary (deve contenere valid_mask o semseg)
+            obj_h: Object height
+            obj_w: Object width
+            h: Image height
+            w: Image width
+            y_min: Minimum y position (bottom constraint)
+        
+        Returns:
+            (x, y) position tuple or (None, None) if no valid position found
+        """
+        # valid area: preferisci target["valid_mask"] se c'è
+        if "valid_mask" in target:
+            valid_area = target["valid_mask"]
+        elif "semseg" in target:
+            valid_area = (target["semseg"] != 255)
+        else:
+            return (None, None)  # No valid area info, skip
+
+        # bottom constraint
+        valid_area = valid_area.clone()
+        valid_area[:y_min, :] = False
+
+        # Prova a campionare qualche punto valido
+        ysxs = torch.nonzero(valid_area, as_tuple=False)
+        if ysxs.numel() > 0:
+            idx = random.randint(0, ysxs.shape[0] - 1)
+            y, x = ysxs[idx].tolist()
+            # clamp per farci stare l'oggetto
+            x = min(x, max(0, w - obj_w))
+            y = min(y, max(y_min, h - obj_h))  # Ensure y >= y_min
+            return (x, y)
+        else:
+            return (None, None)  # No valid position
+    
+    def _fallback_safe_position(
+        self, target: Dict[str, Any], obj_h: int, obj_w: int, h: int, w: int, y_min: int
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Fallback safe: random position solo in valid_area e bottom band (y >= y_min).
+        Non piazza mai nel padding nero.
+        
+        Returns:
+            (x, y) position tuple or (None, None) if no valid position found
+        """
+        # valid area: preferisci target["valid_mask"] se c'è
+        if "valid_mask" in target:
+            valid_area = target["valid_mask"]
+        elif "semseg" in target:
+            valid_area = (target["semseg"] != 255)
+        else:
+            return (None, None)  # No valid area info, skip
+
+        # bottom constraint
+        valid_area = valid_area.clone()
+        valid_area[:y_min, :] = False
+
+        # Prova a campionare qualche punto valido
+        ysxs = torch.nonzero(valid_area, as_tuple=False)
+        if ysxs.numel() > 0:
+            idx = random.randint(0, ysxs.shape[0] - 1)
+            y, x = ysxs[idx].tolist()
+            # clamp per farci stare l'oggetto
+            x = min(x, max(0, w - obj_w))
+            y = min(y, max(y_min, h - obj_h))  # Ensure y >= y_min
+            return (x, y)
+        else:
+            return (None, None)  # No valid position
     
     def _reset_placement_counters(self):
         """Reset placement counters (called at start of each epoch for logging)"""
