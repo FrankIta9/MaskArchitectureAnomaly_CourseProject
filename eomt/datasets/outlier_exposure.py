@@ -313,7 +313,7 @@ class OutlierExposureTransform(nn.Module):
             cumulative_paste_mask = cumulative_paste_mask | paste_mask
         
         # Task 1: Build ood_mask: 1 = OOD (pasted), 0 = ID (rest)
-        ood_mask = cumulative_paste_mask.uint8()  # 1 = OOD, 0 = ID
+        ood_mask = cumulative_paste_mask.to(torch.uint8)  # 1 = OOD, 0 = ID
         
         # Optional: Set 255 for ignore pixels (where target is ignore)
         # Note: In Cityscapes, ignore pixels are filtered in target_parser, so this is optional
