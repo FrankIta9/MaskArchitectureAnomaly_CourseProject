@@ -5,6 +5,7 @@
 
 from pathlib import Path
 from typing import Union, Optional, Tuple
+import torch
 from torch.utils.data import DataLoader
 from torchvision.datasets import Cityscapes
 
