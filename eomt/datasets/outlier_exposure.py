@@ -370,7 +370,7 @@ class OutlierExposureTransform(nn.Module):
                             continue  # Skip this object if no valid position
                 else:
                     # ORDINE CLASSICO: y -> scale -> x (quando non c'è drivable_mask)
-                    self.random_placement_count += 1
+                    # Fix: Assicura che anche qui non finisca nel padding
                     y_min_ratio, y_max_ratio = self.paste_y_range
                     y_min = int(y_min_ratio * h)
                     y_max = int(y_max_ratio * h)
@@ -384,8 +384,11 @@ class OutlierExposureTransform(nn.Module):
                     obj_h_scaled = min(obj_h_scaled, h)
                     obj_w_scaled = min(obj_w_scaled, w)
                     
-                    x = random.randint(0, max(0, w - obj_w_scaled))
-                    y = min(y, max(0, h - obj_h_scaled))
+                    # Fix: Usa fallback_safe_position anche qui per evitare padding
+                    x, y = self._fallback_safe_position(target, obj_h_scaled, obj_w_scaled, h, w, y_min)
+                    if x is None:
+                        continue  # Skip this object if no valid position
+                    self.random_placement_count += 1
                 
                 # Paste object and get paste_mask
                 img, target, paste_mask = self._paste_object(
@@ -405,9 +408,9 @@ class OutlierExposureTransform(nn.Module):
             # FIX 4: Check ood_ratio and min object size after all objects pasted
             ood_ratio = cumulative_paste_mask.float().mean().item()
             
-            # Config finale: cap "paste troppo grande" - ood_ratio_max = 0.05
+            # Config finale: cap "paste troppo grande" - ood_ratio_max ridotto per non distruggere ID
             # Silent resample: no logging to avoid performance impact
-            OOD_RATIO_MAX = 0.05
+            OOD_RATIO_MAX = 0.03  # Ridotto da 0.05 a 0.03 per meno aggressività (0.02-0.03 range)
             if ood_ratio > OOD_RATIO_MAX:
                 # Paste troppo grande, resample (silent)
                 if resample_attempt < MAX_RESAMPLE - 1:

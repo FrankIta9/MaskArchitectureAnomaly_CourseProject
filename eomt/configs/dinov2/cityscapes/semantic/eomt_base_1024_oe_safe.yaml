@@ -120,8 +120,8 @@ data:
     # IMPORTANTE: true perché hai i file in formato zip
     use_coco_zip: true
     
-    # P1 - Parametri OE ottimizzati per segnale OOD forte e stabile
-    paste_probability: 0.65    # 65% batch ha outliers (config finale)
+    # P1 - Parametri OE ridotti per non distruggere ID (curriculum learning)
+    paste_probability: 0.35    # 35% batch ha outliers (ridotto da 0.65, range 0.3-0.4)
     min_objects: 1              # Min oggetti da incollare per immagine
     max_objects: 2              # Max 2 oggetti (ridotto per stabilità)
     min_scale: 0.22             # Oggetti più grandi (22% immagine)

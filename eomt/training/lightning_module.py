@@ -133,6 +133,27 @@ class LightningModule(lightning.LightningModule):
             ckpt = self._load_ckpt(ckpt_path, load_ckpt_class_head)
             incompatible_keys = self.load_state_dict(ckpt, strict=False)
             
+            # Verifica checkpoint: stampa missing/unexpected keys
+            if incompatible_keys.missing_keys:
+                logging.warning(f"⚠️ Missing keys in checkpoint (not loaded): {len(incompatible_keys.missing_keys)} keys")
+                # Mostra solo primi 10 per non intasare il log
+                for k in incompatible_keys.missing_keys[:10]:
+                    logging.warning(f"  - {k}")
+                if len(incompatible_keys.missing_keys) > 10:
+                    logging.warning(f"  ... and {len(incompatible_keys.missing_keys) - 10} more")
+            else:
+                logging.info("✅ All expected keys found in checkpoint")
+            
+            if incompatible_keys.unexpected_keys:
+                logging.warning(f"⚠️ Unexpected keys in checkpoint (ignored): {len(incompatible_keys.unexpected_keys)} keys")
+                # Mostra solo primi 10 per non intasare il log
+                for k in incompatible_keys.unexpected_keys[:10]:
+                    logging.warning(f"  - {k}")
+                if len(incompatible_keys.unexpected_keys) > 10:
+                    logging.warning(f"  ... and {len(incompatible_keys.unexpected_keys) - 10} more")
+            else:
+                logging.info("✅ No unexpected keys in checkpoint")
+            
             # Check if class_head weights were loaded correctly
             if load_ckpt_class_head:
                 # Check both in checkpoint and in model (after loading)
