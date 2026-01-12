@@ -638,10 +638,13 @@ class LightningModule(lightning.LightningModule):
                                     # Accumulate individual values (sample to avoid memory issues)
                                     energy_id_values = energy_id.detach().cpu().numpy().flatten()  # Flatten to 1D array
                                     # Sample up to 1000 values per batch to avoid memory explosion
-                                    if len(energy_id_values) > 1000:
-                                        indices = np.random.choice(len(energy_id_values), size=1000, replace=False)
-                                        energy_id_values = energy_id_values[indices]
-                                    self._energy_id_buffer.extend(energy_id_values.tolist())
+                                    # Fix: k = min(1000, len(energy_id_values)) per evitare crash quando len < 1000
+                                    k = min(1000, len(energy_id_values))
+                                    if k > 0:
+                                        if len(energy_id_values) > 1000:
+                                            indices = np.random.choice(len(energy_id_values), size=k, replace=False)
+                                            energy_id_values = energy_id_values[indices]
+                                        self._energy_id_buffer.extend(energy_id_values.tolist())
                             
                             if energy_ood.numel() > 0:
                                 energy_ood_mean = energy_ood.mean().item()
@@ -671,10 +674,13 @@ class LightningModule(lightning.LightningModule):
                                     # Accumulate individual values (sample to avoid memory issues)
                                     energy_ood_values = energy_ood.detach().cpu().numpy().flatten()  # Flatten to 1D array
                                     # Sample up to 1000 values per batch to avoid memory explosion
-                                    if len(energy_ood_values) > 1000:
-                                        indices = np.random.choice(len(energy_ood_values), size=1000, replace=False)
-                                        energy_ood_values = energy_ood_values[indices]
-                                    self._energy_ood_buffer.extend(energy_ood_values.tolist())
+                                    # Fix: k = min(1000, len(energy_ood_values)) per evitare crash quando len < 1000
+                                    k = min(1000, len(energy_ood_values))
+                                    if k > 0:
+                                        if len(energy_ood_values) > 1000:
+                                            indices = np.random.choice(len(energy_ood_values), size=k, replace=False)
+                                            energy_ood_values = energy_ood_values[indices]
+                                        self._energy_ood_buffer.extend(energy_ood_values.tolist())
                             
                             # A3: Log energy separation
                             if energy_id.numel() > 0 and energy_ood.numel() > 0:
