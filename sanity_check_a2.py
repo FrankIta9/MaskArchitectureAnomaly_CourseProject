@@ -181,11 +181,19 @@ def main():
         ood_ratio_max = max(ood_ratios)
         ood_ratio_std = np.std(ood_ratios)
         
+        # Percentili (P50, P90, P99)
+        ood_ratio_p50 = np.percentile(ood_ratios, 50)
+        ood_ratio_p90 = np.percentile(ood_ratios, 90)
+        ood_ratio_p99 = np.percentile(ood_ratios, 99)
+        
         print(f"OOD Ratio (solo batch con OOD):")
         print(f"  Min: {ood_ratio_min:.6f}")
         print(f"  Mean: {ood_ratio_mean:.6f}")
         print(f"  Max: {ood_ratio_max:.6f}")
         print(f"  Std: {ood_ratio_std:.6f}")
+        print(f"  P50 (median): {ood_ratio_p50:.6f}")
+        print(f"  P90: {ood_ratio_p90:.6f}")
+        print(f"  P99: {ood_ratio_p99:.6f}")
         print()
     else:
         print("❌ ERRORE: Nessun batch con OOD trovato!")
