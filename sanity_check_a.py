@@ -8,6 +8,7 @@ Uso:
 """
 
 import sys
+import os
 import torch
 import numpy as np
 from pathlib import Path
@@ -15,6 +16,15 @@ from PIL import Image
 import yaml
 import importlib
 import argparse
+
+# ============================================================================
+# SETUP PATH - Aggiungi eomt/ al Python path per gli import
+# ============================================================================
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+EOMT_ROOT = os.path.join(CURRENT_DIR, "eomt")
+
+if EOMT_ROOT not in sys.path:
+    sys.path.insert(0, EOMT_ROOT)
 
 
 def main():
