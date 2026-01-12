@@ -171,6 +171,13 @@ def main():
                 # Se semseg è gestito correttamente, i pixel OOD dovrebbero essere già IGNORE
                 # quindi overlap dovrebbe essere 0 (o molto basso)
                 overlap = (ood_mask == 1) & gt_union
+                
+                # Calcola overlap_ratio (come nel ramo masks)
+                ood_pixels_count = (ood_mask == 1).sum().item()
+                if ood_pixels_count > 0:
+                    overlap_ratio = overlap.sum().item() / ood_pixels_count
+                else:
+                    overlap_ratio = 0.0
             elif "masks" in target and target["masks"].numel() > 0:
                 # Fallback: usa masks (metodo vecchio)
                 gt_union = target["masks"].any(dim=0)  # [H, W] bool
