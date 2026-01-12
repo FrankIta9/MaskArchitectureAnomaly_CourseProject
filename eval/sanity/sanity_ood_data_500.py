@@ -328,6 +328,11 @@ def main():
     # S3: GT occlusion
     gt_occlusion_ratios = []
     
+    # Drivable mask statistics
+    drivable_mask_none_count = 0
+    drivable_area_ratios = []
+    samples_with_road_sidewalk = 0  # Samples dove labels contengono 0 (road) o 1 (sidewalk)
+    
     # Esempi per overlay (top 10 per categoria)
     examples_ood_high = []  # OOD in alto (top_ratio alto)
     examples_ood_huge = []  # OOD enorme (ood_ratio alto)
@@ -352,6 +357,58 @@ def main():
             
             ood_mask = target["ood_mask"]  # [H, W]
             h, w = ood_mask.shape
+            
+            # Drivable mask statistics (per tutti i batch, non solo quelli con OOD)
+            if "masks" in target and "labels" in target and target["masks"].numel() > 0:
+                # Simula _get_drivable_mask per calcolare statistiche
+                masks = target["masks"]  # [N, H, W]
+                labels = target["labels"]  # List o Tensor
+                
+                # Check se labels contengono 0 (road) o 1 (sidewalk)
+                if isinstance(labels, list):
+                    label_ids = [l.item() if isinstance(l, torch.Tensor) else l for l in labels]
+                else:
+                    label_ids = labels.tolist() if isinstance(labels, torch.Tensor) else labels
+                
+                has_road_sidewalk = any(lid in [0, 1] for lid in label_ids)
+                if has_road_sidewalk:
+                    samples_with_road_sidewalk += 1
+                
+                # Calcola drivable mask (simula logica di _get_drivable_mask)
+                drivable_mask = torch.zeros((h, w), dtype=torch.bool, device=masks.device)
+                for i in range(len(labels)):
+                    if i >= masks.shape[0]:
+                        break
+                    label_id = labels[i]
+                    label_id_val = label_id.item() if isinstance(label_id, torch.Tensor) else label_id
+                    if label_id_val in [0, 1]:  # Road=0, Sidewalk=1
+                        mask_class = masks[i]
+                        if mask_class.dim() == 3:
+                            mask_class = mask_class.squeeze(0)
+                        if mask_class.shape == (h, w):
+                            drivable_mask = drivable_mask | mask_class.bool()
+                        elif mask_class.numel() > 0:
+                            # Resize se necessario
+                            from torchvision.transforms.v2.functional import resize, InterpolationMode
+                            mask_resized = resize(
+                                mask_class.unsqueeze(0).float() if mask_class.dim() == 2 else mask_class.float(),
+                                (h, w),
+                                interpolation=InterpolationMode.NEAREST
+                            )
+                            if mask_resized.dim() == 3:
+                                mask_resized = mask_resized.squeeze(0)
+                            drivable_mask = drivable_mask | mask_resized.bool()
+                
+                # Calcola area ratio
+                if drivable_mask.any():
+                    drivable_area = drivable_mask.sum().item()
+                    total_area = h * w
+                    drivable_area_ratio = drivable_area / total_area
+                    drivable_area_ratios.append(drivable_area_ratio)
+                else:
+                    drivable_mask_none_count += 1
+            else:
+                drivable_mask_none_count += 1
             
             # Check se c'è OOD (valore 1)
             has_ood = (ood_mask == 1).any().item()
