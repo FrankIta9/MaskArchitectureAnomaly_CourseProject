@@ -89,8 +89,9 @@ class LightningModule(lightning.LightningModule):
         ood_energy_head_enabled: bool = False,
         ood_energy_head_weight: float = 0.1,
         ood_energy_pos_weight_max: float = 50.0,
-        # Training control (fast stabilization): freeze everything except mask_head
-        train_mask_head_only: bool = False,
+        # Training control (fast stabilization)
+        train_mask_head_only: bool = False,  # freeze everything except mask_head
+        train_class_head_only: bool = False,  # freeze everything except class_head
     ):
         super().__init__()
 
@@ -111,6 +112,9 @@ class LightningModule(lightning.LightningModule):
         self.lr_backbone = lr_backbone if lr_backbone is not None else lr
         self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
         self.train_mask_head_only = bool(train_mask_head_only)
+        self.train_class_head_only = bool(train_class_head_only)
+        if self.train_mask_head_only and self.train_class_head_only:
+            raise ValueError("Only one of train_mask_head_only/train_class_head_only can be true")
 
         self.strict_loading = False
         
@@ -319,21 +323,27 @@ class LightningModule(lightning.LightningModule):
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
     def configure_optimizers(self):
-        # Fast stabilization mode: freeze everything except mask_head (and optional OOD energy params).
-        if self.train_mask_head_only:
+        # Fast stabilization modes: freeze almost everything.
+        if self.train_mask_head_only or self.train_class_head_only:
             for p in self.parameters():
                 p.requires_grad = False
 
-            if hasattr(self.network, "mask_head"):
-                for p in self.network.mask_head.parameters():
-                    p.requires_grad = True
+            if self.train_mask_head_only:
+                if hasattr(self.network, "mask_head"):
+                    for p in self.network.mask_head.parameters():
+                        p.requires_grad = True
+                print("🔒 Training mode: mask_head only (backbone/class_head frozen)")
+
+            if self.train_class_head_only:
+                if hasattr(self.network, "class_head"):
+                    for p in self.network.class_head.parameters():
+                        p.requires_grad = True
+                print("🔒 Training mode: class_head only (backbone/mask_head frozen)")
 
             # Keep the tiny OOD energy head trainable if enabled (2 scalars)
             if getattr(self, "ood_energy_head_enabled", False):
                 self.ood_energy_a.requires_grad = True
                 self.ood_energy_b.requires_grad = True
-
-            print("🔒 Training mode: mask_head only (backbone/class_head frozen)")
 
         # ===================================================================
         # PARTIAL BACKBONE UNFREEZE FOR OUTLIER EXPOSURE FINE-TUNING
@@ -344,7 +354,7 @@ class LightningModule(lightning.LightningModule):
         # - decoder/head/upscale params: lr_decoder
         # - unfrozen backbone params: lr_backbone (typically lower)
         # ===================================================================
-        if not self.train_mask_head_only and hasattr(self.network, 'encoder'):
+        if not (self.train_mask_head_only or self.train_class_head_only) and hasattr(self.network, 'encoder'):
             if self.unfreeze_last_n_blocks > 0:
                 # CRITICAL FIX: Freeze ENTIRE backbone first (including patch_embed, pos_embed, etc.)
                 if hasattr(self.network.encoder, 'backbone'):

@@ -72,6 +72,7 @@ class MaskClassificationSemantic(LightningModule):
         ood_energy_pos_weight_max: float = 50.0,
         # Training control
         train_mask_head_only: bool = False,
+        train_class_head_only: bool = False,
     ):
         super().__init__(
             network=network,
@@ -97,6 +98,7 @@ class MaskClassificationSemantic(LightningModule):
             ood_energy_head_weight=ood_energy_head_weight,
             ood_energy_pos_weight_max=ood_energy_pos_weight_max,
             train_mask_head_only=train_mask_head_only,
+            train_class_head_only=train_class_head_only,
         )
 
         self.save_hyperparameters(ignore=["_class_path"])
