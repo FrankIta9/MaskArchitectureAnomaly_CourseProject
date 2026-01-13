@@ -66,6 +66,10 @@ class MaskClassificationSemantic(LightningModule):
         ood_lostfound_path: Optional[str] = None,  # Path to FS_LostFound_full dataset
         ood_fsstatic_path: Optional[str] = None,  # Path to fs_static dataset
         ood_val_num_samples: int = 40,  # Number of images per OOD dataset to evaluate (30-50)
+        # Fast energy-based OOD head (sigmoid(a*energy+b))
+        ood_energy_head_enabled: bool = True,
+        ood_energy_head_weight: float = 0.1,
+        ood_energy_pos_weight_max: float = 50.0,
     ):
         super().__init__(
             network=network,
@@ -87,6 +91,9 @@ class MaskClassificationSemantic(LightningModule):
             lr_decoder=lr_decoder,
             lr_backbone=lr_backbone,
             unfreeze_last_n_blocks=unfreeze_last_n_blocks,
+            ood_energy_head_enabled=ood_energy_head_enabled,
+            ood_energy_head_weight=ood_energy_head_weight,
+            ood_energy_pos_weight_max=ood_energy_pos_weight_max,
         )
 
         self.save_hyperparameters(ignore=["_class_path"])

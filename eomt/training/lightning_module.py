@@ -85,6 +85,10 @@ class LightningModule(lightning.LightningModule):
         lr_decoder: Optional[float] = None,  # Optional: override LR for decoder/head/upscale
         lr_backbone: Optional[float] = None,  # Optional: LR for unfrozen backbone blocks
         unfreeze_last_n_blocks: int = 0,  # Number of last backbone blocks to unfreeze (0 = all frozen)
+        # Energy-based OOD head (fast, 2 params): sigmoid(a*energy+b)
+        ood_energy_head_enabled: bool = False,
+        ood_energy_head_weight: float = 0.1,
+        ood_energy_pos_weight_max: float = 50.0,
     ):
         super().__init__()
 
@@ -116,6 +120,13 @@ class LightningModule(lightning.LightningModule):
         self._energy_id_buffer = []  # List to accumulate E_id values
         self._energy_ood_buffer = []  # List to accumulate E_ood values
         self._energy_margins_computed = False  # Flag to track if margins have been computed
+
+        # Optional: Energy-based OOD head (learns a,b for sigmoid(a*energy+b))
+        self.ood_energy_head_enabled = bool(ood_energy_head_enabled)
+        self.ood_energy_head_weight = float(ood_energy_head_weight)
+        self.ood_energy_pos_weight_max = float(ood_energy_pos_weight_max)
+        self.ood_energy_a = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        self.ood_energy_b = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
 
         if delta_weights and ckpt_path:
             logging.info("Delta weights mode")
@@ -850,7 +861,95 @@ class LightningModule(lightning.LightningModule):
                 # Clamp for numerical stability
                 pixel_logits_scaled = torch.clamp(pixel_logits_scaled, min=-50.0, max=50.0)
                 energy_map = -T * torch.logsumexp(pixel_logits_scaled, dim=1)  # [B, H, W]
-                
+
+                # ------------------------------------------------------------------
+                # Fast OOD head (energy-based): supervise sigmoid(a*energy+b) with ood_mask
+                # ------------------------------------------------------------------
+                if self.ood_energy_head_enabled and self.ood_energy_head_weight > 0.0:
+                    try:
+                        ood_masks = []
+                        valid_masks = []
+                        for t in targets:
+                            ood_masks.append(t["ood_mask"].to(device=energy_map.device))
+                            if "valid_mask" in t and torch.is_tensor(t["valid_mask"]):
+                                valid_masks.append(t["valid_mask"].to(device=energy_map.device).to(torch.bool))
+                            else:
+                                valid_masks.append(None)
+
+                        ood_mask_bhw = torch.stack(ood_masks, dim=0)  # [B, H, W]
+                        y = (ood_mask_bhw == 1).to(dtype=energy_map.dtype)
+                        valid = (ood_mask_bhw != 255)
+
+                        # Apply valid_mask too (padding/letterbox safety)
+                        if any(vm is not None for vm in valid_masks):
+                            vm_bhw = torch.stack(
+                                [vm if vm is not None else torch.ones_like(valid[0], dtype=torch.bool) for vm in valid_masks],
+                                dim=0,
+                            )
+                            valid = valid & vm_bhw
+
+                        if valid.any():
+                            ood_logit = self.ood_energy_a * energy_map + self.ood_energy_b  # [B, H, W]
+                            logits_flat = ood_logit[valid]
+                            y_flat = y[valid]
+
+                            n_pos = float((y_flat > 0.5).sum().item())
+                            n_total = float(y_flat.numel())
+                            n_neg = max(0.0, n_total - n_pos)
+
+                            if n_pos > 0.0:
+                                pos_weight_val = n_neg / max(1.0, n_pos)
+                            else:
+                                pos_weight_val = 1.0
+
+                            pos_weight_val = float(min(pos_weight_val, self.ood_energy_pos_weight_max))
+                            pos_weight = torch.tensor(pos_weight_val, device=energy_map.device, dtype=energy_map.dtype)
+
+                            bce = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+                            ood_loss = bce(logits_flat, y_flat)
+                            self.log(
+                                "loss/ood_energy_head",
+                                float(ood_loss.detach().item()),
+                                on_step=True,
+                                on_epoch=True,
+                                prog_bar=False,
+                                logger=True,
+                                sync_dist=False,
+                            )
+                            self.log(
+                                "dbg/ood_energy_head/pos_weight",
+                                pos_weight_val,
+                                on_step=True,
+                                on_epoch=False,
+                                prog_bar=False,
+                                logger=True,
+                                sync_dist=False,
+                            )
+                            self.log(
+                                "dbg/ood_energy_head/a",
+                                float(self.ood_energy_a.detach().item()),
+                                on_step=True,
+                                on_epoch=False,
+                                prog_bar=False,
+                                logger=True,
+                                sync_dist=False,
+                            )
+                            self.log(
+                                "dbg/ood_energy_head/b",
+                                float(self.ood_energy_b.detach().item()),
+                                on_step=True,
+                                on_epoch=False,
+                                prog_bar=False,
+                                logger=True,
+                                sync_dist=False,
+                            )
+
+                            # Add to total loss (kept small to preserve Cityscapes mIoU)
+                            losses_all_blocks["eim_ood_energy_head"] = self.ood_energy_head_weight * ood_loss
+                    except Exception as e:
+                        # Never crash training for this auxiliary head
+                        logging.warning(f"OOD energy head skipped due to error: {e}")
+
                 # Process each sample in the batch
                 for batch_idx_internal, target in enumerate(targets):
                     if "ood_mask" in target:
