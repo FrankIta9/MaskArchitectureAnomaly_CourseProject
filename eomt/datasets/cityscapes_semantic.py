@@ -36,10 +36,18 @@ class CityscapesSemantic(LightningDataModule):
         )
         self.save_hyperparameters(ignore=["_class_path"])
 
-        self.transforms = Transforms(
+        self.train_transforms = Transforms(
             img_size=img_size,
             color_jitter_enabled=color_jitter_enabled,
             scale_range=scale_range,
+            train=True,
+        )
+        self.eval_transforms = Transforms(
+            img_size=img_size,
+            color_jitter_enabled=False,
+            scale_range=(1.0, 1.0),
+            outlier_exposure_transform=None,
+            train=False,
         )
 
     @staticmethod
@@ -69,12 +77,13 @@ class CityscapesSemantic(LightningDataModule):
             "check_empty_targets": self.check_empty_targets,
         }
         self.cityscapes_train_dataset = Dataset(
-            transforms=self.transforms,
+            transforms=self.train_transforms,
             img_folder_path_in_zip=Path("./leftImg8bit/train"),
             target_folder_path_in_zip=Path("./gtFine/train"),
             **cityscapes_dataset_kwargs,
         )
         self.cityscapes_val_dataset = Dataset(
+            transforms=self.eval_transforms,
             img_folder_path_in_zip=Path("./leftImg8bit/val"),
             target_folder_path_in_zip=Path("./gtFine/val"),
             **cityscapes_dataset_kwargs,

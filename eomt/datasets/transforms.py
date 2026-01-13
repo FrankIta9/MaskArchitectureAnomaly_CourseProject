@@ -63,6 +63,7 @@ class Transforms(nn.Module):
         saturation_factor: float = 0.5,
         max_hue_delta: int = 18,
         outlier_exposure_transform: Optional[nn.Module] = None,
+        train: bool = True,
     ):
         """
         Args:
@@ -72,6 +73,7 @@ class Transforms(nn.Module):
 
         self.img_size = img_size
         self.color_jitter_enabled = color_jitter_enabled
+        self.train = bool(train)
         self.max_brightness_factor = max_brightness_delta / 255.0
         self.max_contrast_factor = max_contrast_factor
         self.max_saturation_factor = saturation_factor
@@ -80,7 +82,8 @@ class Transforms(nn.Module):
         self.random_horizontal_flip = T.RandomHorizontalFlip()
         self.scale_jitter = T.ScaleJitter(target_size=img_size, scale_range=scale_range)
         self.random_crop = T.RandomCrop(img_size)
-        
+        self.eval_resize = T.Resize(img_size, antialias=True)
+
         # Outlier Exposure (optional)
         self.outlier_exposure_transform = outlier_exposure_transform
 
@@ -234,16 +237,23 @@ class Transforms(nn.Module):
 
         target = self._filter(target, ~target["is_crowd"])
 
-        img = self.color_jitter(img)
-        img, target = self.random_horizontal_flip(img, target)
-        img, target = self.scale_jitter(img, target)
-        img, target = self.pad(img, target)
-        img, target = self.random_crop(img, target)
-        
-        # Apply Outlier Exposure (cut-paste) if enabled
-        # Apply before filtering to ensure anomaly masks are included
-        if self.outlier_exposure_transform is not None:
-            img, target = self.outlier_exposure_transform(img, target)
+        if self.train:
+            img = self.color_jitter(img)
+            img, target = self.random_horizontal_flip(img, target)
+            img, target = self.scale_jitter(img, target)
+            img, target = self.pad(img, target)
+            img, target = self.random_crop(img, target)
+
+            # Apply Outlier Exposure (cut-paste) if enabled
+            # Apply before filtering to ensure anomaly masks are included
+            if self.outlier_exposure_transform is not None:
+                img, target = self.outlier_exposure_transform(img, target)
+        else:
+            # Deterministic eval path: no random aug, no OE.
+            img, target = self.eval_resize(img, target)
+            target["valid_mask"] = torch.ones(
+                (self.img_size[-2], self.img_size[-1]), dtype=torch.bool, device=img.device
+            )
 
         valid = target["masks"].flatten(1).any(1)
         if not valid.any():
