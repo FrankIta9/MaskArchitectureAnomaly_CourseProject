@@ -463,11 +463,22 @@ class LightningModule(lightning.LightningModule):
         }
 
     def forward(self, imgs):
-        # P0 - Problema #2: Normalizzazione gestita da EoMT.forward
-        # EoMT.forward applica già: x = (x - self.encoder.pixel_mean) / self.encoder.pixel_std
-        # Quindi qui facciamo solo la conversione a float e divisione per 255.0
-        x = imgs.float() / 255.0
-        
+        # Normalization is handled by EoMT.forward.
+        # Here we only ensure a consistent input scale in [0, 1].
+        # Datasets/augmentations may return uint8 [0,255] OR float already in [0,1].
+        x = imgs
+        if x.dtype == torch.uint8:
+            x = x.to(torch.float32) / 255.0
+        else:
+            x = x.to(torch.float32)
+            # Heuristic: if values look like [0,255], rescale to [0,1]
+            x_max = float(x.detach().max().item()) if x.numel() > 0 else 0.0
+            if x_max > 1.5:
+                x = x / 255.0
+
+        # Keep within a sane range (helps stability with aggressive aug/paste)
+        x = x.clamp(0.0, 1.0)
+
         return self.network(x)
 
     def training_step(self, batch, batch_idx):
