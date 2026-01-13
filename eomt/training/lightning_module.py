@@ -2179,6 +2179,8 @@ class LightningModule(lightning.LightningModule):
         return ckpt
 
     def _raise_on_incompatible(self, incompatible_keys, load_ckpt_class_head):
+        ignored_missing_prefixes = ("ood_energy_",)
+
         if incompatible_keys.missing_keys:
             if not load_ckpt_class_head:
                 missing_keys = [
@@ -2187,8 +2189,15 @@ class LightningModule(lightning.LightningModule):
                     if "class_head" not in key and "class_predictor" not in key
                 ]
             else:
-                missing_keys = incompatible_keys.missing_keys
+                missing_keys = list(incompatible_keys.missing_keys)
+
+            # Backward compatibility: allow new optional params not present in old checkpoints
+            missing_keys = [
+                key for key in missing_keys if not key.startswith(ignored_missing_prefixes)
+            ]
+
             if missing_keys:
                 raise ValueError(f"Missing keys: {missing_keys}")
+
         if incompatible_keys.unexpected_keys:
             raise ValueError(f"Unexpected keys: {incompatible_keys.unexpected_keys}")
