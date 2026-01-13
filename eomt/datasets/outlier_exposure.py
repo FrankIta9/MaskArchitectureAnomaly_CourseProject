@@ -449,14 +449,31 @@ class OutlierExposureTransform(nn.Module):
             # If dimensions are too small, skip feathering (use original mask)
             mask_blurred = mask_blurred.squeeze(0).squeeze(0)  # [H, W]
             
-            # Simple alpha blending with feathered mask (no color matching, no shadow, no occlusion)
+            # Simple alpha blending with feathered mask.
+            # NOTE: COCO objects are loaded as float in [0, 1]. Cityscapes images can be uint8 [0,255].
+            # Make sure we blend in a consistent scale, otherwise pasted objects become nearly invisible
+            # and the OOD supervision becomes inconsistent (mask says OOD but pixels stay ID).
             bg_patch = img_clone[:, y:y_end, x:x_end]  # [3, H, W]
-            for c in range(3):
-                blended = (
-                    self.blend_alpha * obj_img_resized[c] * mask_blurred + 
-                    (1 - self.blend_alpha * mask_blurred) * bg_patch[c]
-                )
-                img_clone[c, y:y_end, x:x_end] = blended
+
+            img_dtype = img_clone.dtype
+            img_max = float(bg_patch.max().item()) if bg_patch.numel() > 0 else 0.0
+            img_is_255_scale = (img_dtype == torch.uint8) or (img_dtype.is_floating_point and img_max > 1.5)
+
+            bg_f32 = bg_patch.to(torch.float32)
+            obj_f32 = obj_img_resized.to(torch.float32)
+            if img_is_255_scale:
+                obj_f32 = obj_f32 * 255.0
+
+            alpha = float(self.blend_alpha)
+            m = mask_blurred.to(torch.float32)
+            blended = alpha * obj_f32 * m.unsqueeze(0) + (1.0 - alpha * m.unsqueeze(0)) * bg_f32
+
+            if img_dtype == torch.uint8:
+                blended = blended.clamp(0.0, 255.0).to(torch.uint8)
+            else:
+                blended = blended.to(img_dtype)
+
+            img_clone[:, y:y_end, x:x_end] = blended
             
             # HYBRID STRATEGY: ID augmentation vs OOD augmentation
             # FIX 1: Scrittura SOLO su pixel già IGNORE (semseg==255) + valid_mask
